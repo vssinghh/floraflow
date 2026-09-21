@@ -27,7 +27,6 @@ wheels/
 # Virtual environments
 .venv/
 venv/
-ENV/
 
 # Testing and coverage
 .pytest_cache/
