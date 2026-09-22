@@ -81,21 +81,21 @@ uv pip install -e .
 ```
 
 ### 1. Collect Demonstrations
-Generate 100 expert demonstrations ($17,400$ state-action transitions):
+Generate 500 expert demonstrations across widened workspace bounds ($87,000$ state-action transitions):
 ```bash
-uv run scripts/01_generate_demos.py --num-demos 100 --output data/watering_demos_100.h5
+uv run scripts/01_generate_demos.py --num-demos 500 --output data/watering_demos_widened_500.h5 --widened-bounds
 ```
 
 ### 2. Train Flow Matching Policy
 Train the 840K-parameter vector field policy head on Apple Silicon MPS or CUDA GPU:
 ```bash
-uv run scripts/02_train_policy.py --epochs 100 --batch-size 256
+uv run scripts/02_train_policy.py --data-path data/watering_demos_widened_500.h5 --epochs 80
 ```
 
 ### 3. Evaluate Closed-Loop Policy
-Benchmark closed-loop execution across both in-distribution and out-of-distribution spatial configurations:
+Benchmark closed-loop execution with continuous Temporal Ensembling across in-distribution and Hard out-of-distribution scenarios:
 ```bash
-uv run scripts/03_evaluate_policy.py --num-episodes 20 --mode both
+uv run scripts/03_evaluate_policy.py --mode both --difficulty hard --num-episodes 50
 ```
 
 ### 4. Run Test Suite
@@ -117,17 +117,19 @@ Closed-loop evaluation conducted across 20 held-out in-distribution trials and 2
 
 ### Verification Scorecard
 
-| Evaluation Metric | In-Distribution (Held-Out Seeds) | Out-of-Distribution (Spatial Perturbations) | Real-Time Requirement |
+| Evaluation Metric | In-Distribution (Held-Out Seeds) | Hard Out-of-Distribution (5-10 cm Shifts) | Real-Time Requirement |
 | :--- | :--- | :--- | :--- |
-| **Total Evaluation Episodes** | 20 episodes | 20 episodes | - |
-| **Task Success Rate** | **65.0%** (13 / 20) | **60.0%** (12 / 20) | > 50% |
-| **Mean Maximum Tilt Angle** | **82.0°** | **88.2°** | > 40.0° |
-| **Mean Spout Alignment Error** | 15.2 cm | 18.9 cm | < 20.0 cm |
-| **Mean Inference Latency** | **3.67 ms** | **3.65 ms** | **< 50.0 ms (20 Hz)** |
+| **Total Evaluation Episodes** | 20 episodes | 50 episodes | - |
+| **Task Success Rate** | **100.0%** (20 / 20) | **96.0%** (48 / 50) | > 80% |
+| **Mean Maximum Tilt Angle** | **89.8°** | **80.1°** | > 40.0° |
+| **Mean Spout Alignment Error** | **8.0 cm** | **9.8 cm** | < 14.0 cm |
+| **Mean Fluid Particles in Pot** | **0.70** | **1.22** | > 0 |
+| **Mean Inference Latency** | **3.59 ms** | **3.56 ms** | **< 50.0 ms (20 Hz)** |
 | **Real-Time Control Constraint** | **PASS** | **PASS** | Sub-15 ms target |
 
 ### Technical Highlights
 1. **Zero External Framework Dependencies**: The entire Flow Matching calculus (optimal transport probability paths, analytical velocity vector fields, and explicit Euler numerical ODE integration) is implemented directly in pure PyTorch.
-2. **Sub-4ms Inference Latency**: At 3.67 ms per ODE solve (10 Euler integration steps), policy inference consumes less than 8% of the 50 ms control interval at 20 Hz, leaving ample headroom for virtual vision sensing.
-3. **Action Chunk Execution Horizon**: Executing $K=12$ steps from each predicted $H=16$ chunk suppresses high-frequency feedback jitter, preserving smooth minimum-jerk kinematic execution.
+2. **Temporal Ensembling**: Replaces open-loop execution with continuous sliding window exponential blending ($w_i = \exp(-0.05 \cdot i)$) at every control step, eliminating velocity seams and delivering 96.0% success on aggressive 5 to 10 cm displacements.
+3. **Sub-4ms Inference Latency**: At 3.56 ms per ODE solve (10 Euler integration steps), policy inference consumes less than 8% of the 50 ms control interval at 20 Hz, leaving ample headroom for visual sensing.
+4. **Data Density over Model Size**: Expanding demonstrations to 500 episodes across widened bounds dropped vector field MSE loss by 60.7% and eliminated compounding covariate shift without increasing model parameters.
 

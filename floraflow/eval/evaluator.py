@@ -107,6 +107,8 @@ class PolicyEvaluator:
         max_steps: int = 200,
         exec_horizon: int = 8,
         num_ode_steps: int = 10,
+        temporal_ensemble: bool = False,
+        ensemble_decay: float = 0.05,
     ) -> EpisodeResult:
         """Execute one complete closed-loop evaluation episode."""
         obs = self.env.reset(seed=seed, can_xy=can_xy, plant_xy=plant_xy)
@@ -120,34 +122,45 @@ class PolicyEvaluator:
         is_pouring = False
         step_count = 0
 
-        while step_count < max_steps:
-            # 1. Feature extraction and normalization
-            obs_vec = extract_observation_vector(obs, step_idx=step_count)
-            norm_obs = (torch.tensor(obs_vec, device=self.device, dtype=torch.float32) - self.obs_mean) / self.obs_std
-            norm_obs_batch = norm_obs.unsqueeze(0)
+        if temporal_ensemble:
+            # Temporal Ensembling with exponential decay weighting
+            buf_len = max_steps + self.horizon + 1
+            action_buffer = np.zeros((buf_len, self.act_dim), dtype=np.float32)
+            weight_buffer = np.zeros((buf_len,), dtype=np.float32)
+            ensemble_weights = np.exp(-ensemble_decay * np.arange(self.horizon)).astype(np.float32)
 
-            # 2. Flow Matching ODE inference
-            t_infer_start = time.perf_counter()
-            with torch.no_grad():
-                pred_chunk_norm = self.cfm.sample(
-                    self.model,
-                    norm_obs_batch,
-                    horizon=self.horizon,
-                    act_dim=self.act_dim,
-                    num_steps=num_ode_steps,
-                )
-            latency_ms = (time.perf_counter() - t_infer_start) * 1000.0
-            latencies.append(latency_ms)
+            while step_count < max_steps:
+                # 1. Feature extraction and normalization
+                obs_vec = extract_observation_vector(obs, step_idx=step_count)
+                norm_obs = (torch.tensor(obs_vec, device=self.device, dtype=torch.float32) - self.obs_mean) / self.obs_std
+                norm_obs_batch = norm_obs.unsqueeze(0)
 
-            # 3. Unnormalize predicted action chunk
-            pred_chunk = pred_chunk_norm.squeeze(0).cpu().numpy()
-            pred_chunk = pred_chunk * self.act_std + self.act_mean
+                # 2. Flow Matching ODE inference
+                t_infer_start = time.perf_counter()
+                with torch.no_grad():
+                    pred_chunk_norm = self.cfm.sample(
+                        self.model,
+                        norm_obs_batch,
+                        horizon=self.horizon,
+                        act_dim=self.act_dim,
+                        num_steps=num_ode_steps,
+                    )
+                latency_ms = (time.perf_counter() - t_infer_start) * 1000.0
+                latencies.append(latency_ms)
 
-            # 4. Execute sub-horizon actions in environment
-            steps_to_exec = min(exec_horizon, max_steps - step_count)
-            for i in range(steps_to_exec):
-                action = pred_chunk[i]
-                obs, _, _, info = self.env.step(action)
+                # 3. Unnormalize predicted action chunk (H, act_dim)
+                pred_chunk = pred_chunk_norm.squeeze(0).cpu().numpy()
+                pred_chunk = pred_chunk * self.act_std + self.act_mean
+
+                # 4. Accumulate into future buffer slots
+                for h in range(self.horizon):
+                    idx = step_count + h
+                    action_buffer[idx] += ensemble_weights[h] * pred_chunk[h]
+                    weight_buffer[idx] += ensemble_weights[h]
+
+                # 5. Execute blended action for current timestep
+                blended_act = action_buffer[step_count] / max(weight_buffer[step_count], 1e-6)
+                obs, _, _, info = self.env.step(blended_act)
                 step_count += 1
 
                 min_spout_dist = min(min_spout_dist, info["spout_dist"])
@@ -156,9 +169,47 @@ class PolicyEvaluator:
                     success = True
                 if info["is_pouring"]:
                     is_pouring = True
+        else:
+            # Standard sub-horizon open-loop execution
+            while step_count < max_steps:
+                # 1. Feature extraction and normalization
+                obs_vec = extract_observation_vector(obs, step_idx=step_count)
+                norm_obs = (torch.tensor(obs_vec, device=self.device, dtype=torch.float32) - self.obs_mean) / self.obs_std
+                norm_obs_batch = norm_obs.unsqueeze(0)
 
-                if step_count >= max_steps:
-                    break
+                # 2. Flow Matching ODE inference
+                t_infer_start = time.perf_counter()
+                with torch.no_grad():
+                    pred_chunk_norm = self.cfm.sample(
+                        self.model,
+                        norm_obs_batch,
+                        horizon=self.horizon,
+                        act_dim=self.act_dim,
+                        num_steps=num_ode_steps,
+                    )
+                latency_ms = (time.perf_counter() - t_infer_start) * 1000.0
+                latencies.append(latency_ms)
+
+                # 3. Unnormalize predicted action chunk
+                pred_chunk = pred_chunk_norm.squeeze(0).cpu().numpy()
+                pred_chunk = pred_chunk * self.act_std + self.act_mean
+
+                # 4. Execute sub-horizon actions in environment
+                steps_to_exec = min(exec_horizon, max_steps - step_count)
+                for i in range(steps_to_exec):
+                    action = pred_chunk[i]
+                    obs, _, _, info = self.env.step(action)
+                    step_count += 1
+
+                    min_spout_dist = min(min_spout_dist, info["spout_dist"])
+                    max_tilt_deg = max(max_tilt_deg, info["tilt_deg"])
+                    if info["success"]:
+                        success = True
+                    if info["is_pouring"]:
+                        is_pouring = True
+
+                    if step_count >= max_steps:
+                        break
 
         particles = int(obs["particles_in_pot"][0])
         mean_latency = float(np.mean(latencies)) if latencies else 0.0
@@ -184,6 +235,8 @@ class PolicyEvaluator:
         max_steps: int = 200,
         exec_horizon: int = 8,
         num_ode_steps: int = 10,
+        temporal_ensemble: bool = False,
+        ensemble_decay: float = 0.05,
     ) -> BenchmarkScorecard:
         """Run evaluation benchmark across a collection of seeds."""
         results: List[EpisodeResult] = []
@@ -200,6 +253,8 @@ class PolicyEvaluator:
                 max_steps=max_steps,
                 exec_horizon=exec_horizon,
                 num_ode_steps=num_ode_steps,
+                temporal_ensemble=temporal_ensemble,
+                ensemble_decay=ensemble_decay,
             )
             results.append(res)
 

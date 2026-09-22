@@ -38,6 +38,8 @@ data/*.h5
 data/*.hdf5
 checkpoints/*.pt
 checkpoints/*.pth
+checkpoints/**/*.pt
+checkpoints/**/*.pth
 *.mp4
 *.png
 !assets/*.png

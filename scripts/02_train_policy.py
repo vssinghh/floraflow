@@ -30,6 +30,7 @@ def train_policy(
     horizon: int = 16,
     hidden_dim: int = 256,
     num_blocks: int = 4,
+    gripper_weight: float = 2.5,
     device_str: str = "auto",
 ) -> None:
     """Train Flow Matching action chunker policy."""
@@ -79,7 +80,7 @@ def train_policy(
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Policy network initialized with {total_params:,} trainable parameters.")
 
-    cfm = ConditionalFlowMatcher(sigma_min=1e-4, gripper_weight=2.5)
+    cfm = ConditionalFlowMatcher(sigma_min=1e-4, gripper_weight=gripper_weight)
 
     # 3. Optimizer and Learning Rate Scheduler
     optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
@@ -181,6 +182,7 @@ def main() -> None:
     parser.add_argument("--horizon", type=int, default=16)
     parser.add_argument("--hidden-dim", type=int, default=256)
     parser.add_argument("--num-blocks", type=int, default=4)
+    parser.add_argument("--gripper-weight", type=float, default=2.5)
     parser.add_argument("--device", type=str, default="auto")
     args = parser.parse_args()
 
@@ -193,6 +195,7 @@ def main() -> None:
         horizon=args.horizon,
         hidden_dim=args.hidden_dim,
         num_blocks=args.num_blocks,
+        gripper_weight=args.gripper_weight,
         device_str=args.device,
     )
 

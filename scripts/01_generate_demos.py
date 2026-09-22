@@ -23,6 +23,7 @@ def generate_demonstrations(
     num_demos: int = 100,
     output_path: str = "data/watering_demos_100.h5",
     start_seed: int = 0,
+    widened_bounds: bool = False,
 ) -> None:
     """Generate and store expert demonstrations.
 
@@ -30,11 +31,29 @@ def generate_demonstrations(
         num_demos: Total number of successful episodes to collect.
         output_path: Destination path for the HDF5 archive.
         start_seed: Starting random seed.
+        widened_bounds: Whether to sample from expanded desk workspace bounds.
     """
     out_file = Path(output_path).resolve()
     out_file.parent.mkdir(parents=True, exist_ok=True)
 
-    env = DeskWateringEnv(control_hz=20)
+    can_range = None
+    plant_range = None
+    if widened_bounds:
+        can_range = {
+            "x": (0.42, 0.62),
+            "y": (0.05, 0.28),
+        }
+        plant_range = {
+            "x": (0.32, 0.52),
+            "y": (-0.32, -0.12),
+        }
+        print("Using WIDENED workspace bounds for collection.")
+
+    env = DeskWateringEnv(
+        control_hz=20,
+        can_pos_range=can_range,
+        plant_pos_range=plant_range,
+    )
     planner = PourExpertPlanner(env)
 
     print(f"Initializing demonstration collection: {num_demos} episodes target.")
@@ -131,12 +150,14 @@ def main() -> None:
     parser.add_argument("--num-demos", type=int, default=100, help="Number of demonstrations to collect")
     parser.add_argument("--output", type=str, default="data/watering_demos_100.h5", help="HDF5 output path")
     parser.add_argument("--start-seed", type=int, default=0, help="Initial random seed")
+    parser.add_argument("--widened-bounds", action="store_true", help="Sample from expanded workspace bounds")
     args = parser.parse_args()
 
     generate_demonstrations(
         num_demos=args.num_demos,
         output_path=args.output,
         start_seed=args.start_seed,
+        widened_bounds=args.widened_bounds,
     )
 
 

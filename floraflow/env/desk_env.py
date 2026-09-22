@@ -32,8 +32,12 @@ class DeskWateringEnv:
         xml_path: Optional[str] = None,
         control_hz: int = 20,
         physics_dt: float = 0.002,
+        can_pos_range: Optional[Dict[str, Tuple[float, float]]] = None,
+        plant_pos_range: Optional[Dict[str, Tuple[float, float]]] = None,
     ) -> None:
         """Initialize the MuJoCo simulation environment."""
+        self.can_pos_range = can_pos_range if can_pos_range is not None else self.DEFAULT_CAN_POS_RANGE
+        self.plant_pos_range = plant_pos_range if plant_pos_range is not None else self.DEFAULT_PLANT_POS_RANGE
         if xml_path is None:
             pkg_root = Path(__file__).resolve().parent.parent.parent
             xml_path = str(pkg_root / "assets" / "scenes" / "desk_scene.xml")
@@ -103,8 +107,8 @@ class DeskWateringEnv:
 
         # Randomize or assign watering can position
         if can_xy is None:
-            can_x = rng.uniform(*self.DEFAULT_CAN_POS_RANGE["x"])
-            can_y = rng.uniform(*self.DEFAULT_CAN_POS_RANGE["y"])
+            can_x = rng.uniform(*self.can_pos_range["x"])
+            can_y = rng.uniform(*self.can_pos_range["y"])
         else:
             can_x, can_y = can_xy
 
@@ -114,8 +118,8 @@ class DeskWateringEnv:
 
         # Randomize or assign plant position
         if plant_xy is None:
-            plant_x = rng.uniform(*self.DEFAULT_PLANT_POS_RANGE["x"])
-            plant_y = rng.uniform(*self.DEFAULT_PLANT_POS_RANGE["y"])
+            plant_x = rng.uniform(*self.plant_pos_range["x"])
+            plant_y = rng.uniform(*self.plant_pos_range["y"])
         else:
             plant_x, plant_y = plant_xy
 
