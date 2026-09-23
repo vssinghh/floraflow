@@ -15,6 +15,7 @@ from typing import Dict, Tuple
 import torch
 from torch.utils.data import DataLoader
 
+from floraflow.data.augmentation import RandomShifter
 from floraflow.data.vision_dataset import VisionWateringDataset
 from floraflow.policy.flow_matching import ConditionalFlowMatcher
 from floraflow.policy.vision_model import VisionFlowMatchingPolicy
@@ -34,6 +35,7 @@ def train_vision_policy(
     hidden_dim: int = 256,
     num_blocks: int = 4,
     gripper_weight: float = 2.5,
+    shift_aug: int = 4,
     device_str: str = "auto",
     cameras: Tuple[str, ...] = ("third_person_cam", "overhead_cam"),
 ) -> None:
@@ -91,6 +93,10 @@ def train_vision_policy(
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Vision policy initialized with {total_params:,} trainable parameters.")
 
+    shifter = RandomShifter(max_shift=shift_aug) if shift_aug > 0 else None
+    if shifter is not None:
+        print(f"Visual data augmentation: RandomShifter(max_shift={shift_aug}) active.")
+
     cfm = ConditionalFlowMatcher(sigma_min=1e-4, gripper_weight=gripper_weight)
 
     # 3. Optimizer and Learning Rate Scheduler
@@ -112,6 +118,10 @@ def train_vision_policy(
         for batch_obs, batch_actions in loader:
             # Move observation tensors to device
             dev_obs = {k: v.to(device) for k, v in batch_obs.items()}
+            if shifter is not None:
+                for cam in cameras:
+                    cam_key = f"rgb_{cam}"
+                    dev_obs[cam_key] = shifter(dev_obs[cam_key])
             dev_actions = batch_actions.to(device)
 
             optimizer.zero_grad()
@@ -186,6 +196,7 @@ def main() -> None:
     parser.add_argument("--horizon", type=int, default=16, help="Action chunk prediction horizon")
     parser.add_argument("--hidden-dim", type=int, default=256, help="Hidden dimension of ResMLP backbone")
     parser.add_argument("--gripper-weight", type=float, default=2.5, help="Gripper loss dimension weight")
+    parser.add_argument("--shift-aug", type=int, default=4, help="Maximum random shift pixels for visual data augmentation")
     parser.add_argument("--device", type=str, default="auto", help="Compute device: auto, cpu, cuda, or mps")
     args = parser.parse_args()
 
@@ -198,6 +209,7 @@ def main() -> None:
         horizon=args.horizon,
         hidden_dim=args.hidden_dim,
         gripper_weight=args.gripper_weight,
+        shift_aug=args.shift_aug,
         device_str=args.device,
     )
 

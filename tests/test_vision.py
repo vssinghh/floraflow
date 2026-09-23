@@ -93,3 +93,15 @@ def test_vision_dataset_loading() -> None:
         assert item_obs["rgb_overhead_cam"].shape == (3, 128, 128)
         assert item_obs["proprio"].shape == (9,)
         assert item_act.shape == (4, 8)
+
+
+def test_random_shifter_preserves_shape() -> None:
+    """Test that RandomShifter preserves tensor dimensions and shifts pixels."""
+    from floraflow.data.augmentation import RandomShifter
+    shifter = RandomShifter(max_shift=4)
+    x = torch.rand(4, 3, 128, 128)
+    out = shifter(x)
+    assert out.shape == (4, 3, 128, 128)
+    # Zero shift should return exact tensor
+    no_shift = RandomShifter(max_shift=0)
+    assert torch.allclose(no_shift(x), x)

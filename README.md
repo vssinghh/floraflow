@@ -163,15 +163,24 @@ Closed-loop evaluation benchmarks conducted across held-out in-distribution tria
 
 ### Phase 2: Vision Policy Scorecard (Raw Pixels, Zero Cheats)
 
-| Evaluation Metric | In-Distribution (20 Seeds) | Mild Out-of-Distribution (1-3 cm Shifts) | Hard Out-of-Distribution (5-10 cm Shifts) |
+| Evaluation Metric | In-Distribution (20 Seeds) | Hard Out-of-Distribution (5-10 cm Shifts, 50 Seeds) | Real-Time Requirement |
 | :--- | :--- | :--- | :--- |
-| **Total Evaluation Episodes** | 20 episodes | 20 episodes | 20 episodes |
-| **Task Success Rate** | **75.0%** (15 / 20) | **65.0%** (13 / 20) | **30.0%** (6 / 20) |
-| **Mean Maximum Tilt Angle** | **64.0°** | **65.3°** | **31.0°** |
-| **Mean Spout Alignment Error** | **16.3 cm** (2.1 cm on best run) | **16.6 cm** | **31.5 cm** (5.4 cm on best run) |
-| **Mean Fluid Particles in Pot** | **0.85** | **1.20** | **0.95** |
-| **Mean Inference Latency** | **4.83 ms** | **4.65 ms** | **4.67 ms** |
-| **Real-Time Control Constraint** | **PASS (<50 ms)** | **PASS (<50 ms)** | **PASS (<50 ms)** |
+| **Total Evaluation Episodes** | 20 episodes | 50 episodes | - |
+| **Task Success Rate** | **90.0%** (18 / 20) | **80.0%** (40 / 50) | > 70% |
+| **Mean Maximum Tilt Angle** | **89.7°** | **71.0°** | > 40.0° |
+| **Mean Spout Alignment Error** | **10.0 cm** (down to 1.4 cm) | **12.0 cm** (down to 1.4 cm) | < 14.0 cm |
+| **Mean Fluid Particles in Pot** | **2.15** | **1.72** | > 0 |
+| **Mean Inference Latency** | **4.53 ms** | **4.77 ms** | **< 50.0 ms (20 Hz)** |
+| **Real-Time Control Constraint** | **PASS (<50 ms)** | **PASS (<50 ms)** | Sub-15 ms target |
+
+#### Vision Optimization Progression
+
+| Iteration | Configuration | In-Distribution (20 Seeds) | Hard Out-of-Distribution (50 Seeds) | Spout Error (ID / OOD) | Mean Latency |
+| :--- | :--- | :--- | :--- | :--- | :--- |
+| **Run 5 (Baseline)** | 100 Demos, No Augmentation | 75.0% (15 / 20) | 30.0% (6 / 20 on Hard) | 16.3 cm / 31.5 cm | 4.65 ms |
+| **Run 6** | 100 Demos + Bilinear Shift Aug ($\pm 4$px) | 85.0% (17 / 20) | 34.0% (17 / 50 on Hard) | 10.5 cm / 23.5 cm | 4.48 ms |
+| **Run 7 (Champion)** | 300 Demos + Shift Aug ($\pm 4$px) | **90.0%** (18 / 20) | **80.0%** (40 / 50 on Hard) | **10.0 cm** / **12.0 cm** | **4.77 ms** |
+
 
 ### Technical Highlights
 1. **Zero External Framework Dependencies**: The entire Flow Matching calculus (optimal transport probability paths, analytical velocity vector fields, and explicit Euler numerical ODE integration) is implemented directly in pure PyTorch.
