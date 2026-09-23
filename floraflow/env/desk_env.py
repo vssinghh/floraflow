@@ -34,10 +34,16 @@ class DeskWateringEnv:
         physics_dt: float = 0.002,
         can_pos_range: Optional[Dict[str, Tuple[float, float]]] = None,
         plant_pos_range: Optional[Dict[str, Tuple[float, float]]] = None,
+        include_rgb: bool = False,
+        rgb_cameras: Tuple[str, ...] = ("third_person_cam",),
+        rgb_resolution: Tuple[int, int] = (128, 128),
     ) -> None:
         """Initialize the MuJoCo simulation environment."""
         self.can_pos_range = can_pos_range if can_pos_range is not None else self.DEFAULT_CAN_POS_RANGE
         self.plant_pos_range = plant_pos_range if plant_pos_range is not None else self.DEFAULT_PLANT_POS_RANGE
+        self.include_rgb = include_rgb
+        self.rgb_cameras = rgb_cameras
+        self.rgb_resolution = rgb_resolution
         if xml_path is None:
             pkg_root = Path(__file__).resolve().parent.parent.parent
             xml_path = str(pkg_root / "assets" / "scenes" / "desk_scene.xml")
@@ -201,7 +207,7 @@ class DeskWateringEnv:
             if d_xy < 0.07 and dz > -0.02 and dz < 0.10:
                 particles_in_pot += 1
 
-        return {
+        obs_dict = {
             "arm_qpos": arm_qpos,
             "arm_qvel": arm_qvel,
             "gripper_width": gripper_width,
@@ -216,6 +222,13 @@ class DeskWateringEnv:
             "tilt_angle_deg": np.array([tilt_angle_deg], dtype=np.float32),
             "particles_in_pot": np.array([particles_in_pot], dtype=np.int32),
         }
+
+        if self.include_rgb:
+            w, h = self.rgb_resolution
+            for cam in self.rgb_cameras:
+                obs_dict[f"rgb_{cam}"] = self.render(camera=cam, width=w, height=h)
+
+        return obs_dict
 
     def step(self, action: np.ndarray) -> Tuple[Dict[str, np.ndarray], float, bool, Dict[str, Any]]:
         """Step simulation forward by one control interval.

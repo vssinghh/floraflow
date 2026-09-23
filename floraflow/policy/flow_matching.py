@@ -6,7 +6,7 @@ and an explicit Euler ODE numerical integrator for real-time inference.
 
 from __future__ import annotations
 
-from typing import Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Tuple, Union
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
@@ -75,7 +75,7 @@ class ConditionalFlowMatcher:
     def sample(
         self,
         model: nn.Module,
-        obs: torch.Tensor,
+        obs: Union[torch.Tensor, Dict[str, torch.Tensor]],
         horizon: int = 16,
         act_dim: int = 8,
         num_steps: int = 10,
@@ -84,7 +84,7 @@ class ConditionalFlowMatcher:
 
         Args:
             model: Trained policy network.
-            obs: Conditioning observation tensor of shape (B, obs_dim).
+            obs: Conditioning observation tensor or dictionary of tensors.
             horizon: Action chunk prediction horizon H.
             act_dim: Action dimension D_act.
             num_steps: Discretization steps for numerical ODE integration.
@@ -93,8 +93,17 @@ class ConditionalFlowMatcher:
             action_chunk: Generated action chunk of shape (B, H, act_dim).
         """
         model.eval()
-        b = obs.shape[0]
-        device = obs.device
+
+        if isinstance(obs, dict):
+            first_val = next(iter(obs.values()))
+            b = first_val.shape[0]
+            device = first_val.device
+            # Precompute visual and proprioceptive features once to avoid redundant conv passes
+            obs_cond = model.extract_obs_features(obs) if hasattr(model, "extract_obs_features") else obs
+        else:
+            b = obs.shape[0]
+            device = obs.device
+            obs_cond = obs
 
         # Initial source sample x0 ~ N(0, I) at t = 0
         x = torch.randn(b, horizon, act_dim, device=device, dtype=torch.float32)
@@ -103,7 +112,7 @@ class ConditionalFlowMatcher:
         for step in range(num_steps):
             t_val = step / num_steps
             t = torch.full((b,), t_val, device=device, dtype=torch.float32)
-            v = model(x, t, obs)
+            v = model(x, t, obs_cond)
             x = x + v * dt
 
         return x

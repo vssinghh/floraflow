@@ -1,0 +1,95 @@
+"""Unit tests for vision-based Flow Matching policy and spatial softmax layers."""
+
+from __future__ import annotations
+
+import tempfile
+from pathlib import Path
+
+import h5py
+import numpy as np
+import pytest
+import torch
+
+from floraflow.data.vision_dataset import VisionWateringDataset
+from floraflow.policy.flow_matching import ConditionalFlowMatcher
+from floraflow.policy.spatial_softmax import SpatialSoftmax
+from floraflow.policy.vision_model import SpatialSoftmaxConvNet, VisionFlowMatchingPolicy
+
+
+def test_spatial_softmax_output_shape_and_coords() -> None:
+    """Test that SpatialSoftmax correctly maps activation peaks to normalized [-1, 1] coordinates."""
+    ssm = SpatialSoftmax(height=8, width=8, num_channels=2, temperature=1.0)
+    feat = torch.zeros(1, 2, 8, 8)
+    feat[0, 0, 0, 0] = 50.0  # Top-left peak
+    feat[0, 1, 7, 7] = 50.0  # Bottom-right peak
+
+    coords = ssm(feat)
+    assert coords.shape == (1, 4)
+    # Channel 0: (-1.0, -1.0)
+    assert abs(coords[0, 0].item() - (-1.0)) < 1e-3
+    assert abs(coords[0, 1].item() - (-1.0)) < 1e-3
+    # Channel 1: (1.0, 1.0)
+    assert abs(coords[0, 2].item() - 1.0) < 1e-3
+    assert abs(coords[0, 3].item() - 1.0) < 1e-3
+
+
+def test_spatial_softmax_convnet_forward() -> None:
+    """Test that 4-layer CNN with Spatial Softmax produces expected feature embedding."""
+    net = SpatialSoftmaxConvNet(in_channels=3, num_keypoints=16, feature_dim=32)
+    img = torch.rand(2, 3, 128, 128)
+    out = net(img)
+    assert out.shape == (2, 32)
+
+
+def test_vision_flow_matching_policy_forward_and_sample() -> None:
+    """Test forward vector field prediction and Euler ODE integration."""
+    policy = VisionFlowMatchingPolicy(
+        act_dim=8,
+        horizon=16,
+        proprio_dim=9,
+        num_keypoints=16,
+        vision_feat_dim=32,
+        proprio_feat_dim=32,
+        hidden_dim=128,
+        num_blocks=2,
+    )
+
+    b = 2
+    obs = {
+        "rgb_third_person_cam": torch.randint(0, 256, (b, 128, 128, 3), dtype=torch.uint8),
+        "rgb_overhead_cam": torch.randint(0, 256, (b, 128, 128, 3), dtype=torch.uint8),
+        "proprio": torch.randn(b, 9),
+    }
+    x_t = torch.randn(b, 16, 8)
+    t = torch.rand(b)
+
+    v_pred = policy(x_t, t, obs)
+    assert v_pred.shape == (b, 16, 8)
+
+    cfm = ConditionalFlowMatcher(gripper_weight=2.5)
+    loss, metrics = cfm.compute_loss(policy, x_t, obs)
+    assert loss.item() >= 0.0
+
+    samples = cfm.sample(policy, obs, horizon=16, act_dim=8, num_steps=3)
+    assert samples.shape == (b, 16, 8)
+
+
+def test_vision_dataset_loading() -> None:
+    """Test VisionWateringDataset loading from a mock HDF5 archive."""
+    with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
+        with h5py.File(tmp.name, "w") as f:
+            grp = f.create_group("data/demo_0")
+            obs_grp = grp.create_group("obs")
+            obs_grp.create_dataset("rgb_third_person_cam", data=np.zeros((10, 128, 128, 3), dtype=np.uint8))
+            obs_grp.create_dataset("rgb_overhead_cam", data=np.zeros((10, 128, 128, 3), dtype=np.uint8))
+            obs_grp.create_dataset("arm_qpos", data=np.zeros((10, 7), dtype=np.float32))
+            obs_grp.create_dataset("gripper_width", data=np.zeros((10, 1), dtype=np.float32))
+            grp.create_dataset("actions", data=np.zeros((10, 8), dtype=np.float32))
+
+        dataset = VisionWateringDataset(h5_path=tmp.name, horizon=4)
+        assert len(dataset) == 10
+        item_obs, item_act = dataset[0]
+        assert item_obs["rgb_third_person_cam"].shape == (3, 128, 128)
+        assert item_obs["rgb_overhead_cam"].shape == (3, 128, 128)
+        assert item_obs["proprio"].shape == (9,)
+        assert item_act.shape == (4, 8)

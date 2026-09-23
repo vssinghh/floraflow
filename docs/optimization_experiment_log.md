@@ -13,6 +13,7 @@ This experiment log tracks progressive improvements to FloraFlow policy accuracy
 | **Run 2** | Data Density Scaling (scale 100 -> 500 demos on nominal bounds) | 500 demos (87.0k steps) | 840K params, gripper_weight=2.5 | **100.0%** (20/20) | **100.0%** (20/20) | 7.8 cm / 8.3 cm | 3.62 ms | **NEW CHAMPION** |
 | **Run 3** | Expanded Domain Randomization (widened bounds by 5-6cm) | 500 demos (widened) | 840K params, gripper_weight=2.5 | **95.0%** (19/20) | **90.0%** (45/50 on HARD) | 9.3 cm / 10.8 cm | 3.66 ms | **NEW CHAMPION** |
 | **Run 4** | Temporal Ensembling (exponential sliding window inference) | 500 demos (widened) | Run 3 checkpoint + temporal blend | **100.0%** (20/20) | **96.0%** (48/50 on HARD) | 8.0 cm / 9.8 cm | 3.56 ms | **ULTIMATE CHAMPION** |
+| **Run 5 (Vision)** | Pixel-to-Action VLA (Dual-cam Spatial Softmax CNN, zero state cheats) | 100 demos (multi-cam) | 1.04M params (SSM CNN + ResMLP) | **75.0%** (15/20) | **65.0%** (Mild) / **30.0%** (Hard) | 16.3 cm / 16.6 cm | 4.65 ms | **VISION CHAMPION** |
 
 ---
 
@@ -168,6 +169,56 @@ HARD OUT-OF-DISTRIBUTION (50 episodes, 5-10 cm shifts):
 - **Takeaway**:
   Temporal ensembling eliminated 60% of the remaining Hard OOD failure modes (dropping failures from 5 down to 2 out of 50). Blending overlapping action chunks at every step prevented boundary overshoot, stabilized the grip, and doubled fluid delivery efficiency without any training cost.
 - **Decision**: **PROMOTE TEMPORAL ENSEMBLING AS DEFAULT INFERENCE STRATEGY.**
+
+---
+
+## 9. Run 5: Pixel-to-Action Vision Milestone (Frontier 1)
+
+- **Hypothesis**: Replacing ground-truth simulator coordinates (`can_pos`, `plant_pos`, `spout_pos`) with dual-camera RGB observations (`third_person_cam` and `overhead_cam`) processed by a 4-layer Spatial Softmax ConvNet trained from scratch will achieve closed-loop physical task execution in real-time.
+- **Architecture**:
+  - Visual Backbone: [`SpatialSoftmaxConvNet`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/policy/vision_model.py#L22) (4 conv layers with GroupNorm and SiLU, 32 learnable keypoints per camera).
+  - Spatial Softmax Layer: [`SpatialSoftmax`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/policy/spatial_softmax.py#L14) with learned temperature parameter $\tau$.
+  - Policy Head: [`VisionFlowMatchingPolicy`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/policy/vision_model.py#L88) fusing 128 visual keypoint coordinates with 9D proprioception (7 joint angles, 1 gripper width, 1 trajectory progress feature) and continuous diffusion time embedding.
+  - Parameter Count: 1,043,266 trainable parameters (~80K per camera, 850K in Flow Matching ResMLP backbone).
+- **Demonstration Dataset**:
+  - Path: [`data/watering_demos_vision_100.h5`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/data/watering_demos_vision_100.h5) (100 episodes, 17,400 transitions, 360.9 MB with gzip compression).
+  - Generated via [`scripts/01b_generate_vision_demos.py`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/scripts/01b_generate_vision_demos.py).
+- **Training Progression**:
+  - Script: [`scripts/02b_train_vision_policy.py`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/scripts/02b_train_vision_policy.py)
+  - Hardware: Apple Silicon GPU (MPS)
+  - Checkpoint: [`checkpoints/best_vision_policy.pt`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/checkpoints/best_vision_policy.pt)
+  - Training Duration: 50 epochs (836.7 seconds, ~13.9 minutes)
+  - Loss Reduction: Dropped from 1.46213 to **0.11558 MSE**
+  - Vector Field Convergence: $|v| = 3.687$ converged to target velocity $|u| = 3.858$
+- **Benchmark Evaluation Results**:
+  ```text
+  IN-DISTRIBUTION (Held-out seeds 100-119, 20 episodes):
+  - Success Rate:            75.0% (15 / 20)  [Autonomous pixel-to-action execution]
+  - Mean Spout Alignment:    16.3 cm          [Sub-10cm on passing episodes, down to 2.1 cm]
+  - Max Tilt Angle:          64.0 deg
+  - Particles in Pot:        0.85             [Successful fluid delivery into target plant]
+  - Inference Latency:       4.83 ms          [10x faster than 50ms 20 Hz budget]
+
+  MILD OUT-OF-DISTRIBUTION (1-3 cm perturbations, seeds 200-219, 20 episodes):
+  - Success Rate:            65.0% (13 / 20)
+  - Mean Spout Alignment:    16.6 cm
+  - Max Tilt Angle:          65.3 deg
+  - Particles in Pot:        1.20
+  - Inference Latency:       4.65 ms          [Real-time PASS]
+
+  HARD OUT-OF-DISTRIBUTION (5-10 cm aggressive shifts, seeds 200-219, 20 episodes):
+  - Success Rate:            30.0% (6 / 20)   [Zero state cheat codes]
+  - Mean Spout Alignment:    31.5 cm          [5.4 cm on best passing run]
+  - Max Tilt Angle:          31.0 deg
+  - Particles in Pot:        0.95
+  - Inference Latency:       4.67 ms          [Real-time PASS]
+  ```
+- **Key Empirical Insights**:
+  1. **Sub-5 ms Real-Time Pixel Latency**: The 4-layer CNN with Spatial Softmax computes visual features and ODE integration in only **4.65 ms to 4.83 ms**, operating at over 200 FPS on Apple Silicon Mac.
+  2. **Trajectory Progress Resolves Symmetry**: Adding progress encoding ($t / 174.0$) into proprioception resolved the non-Markovian ambiguity between descending to grasp and ascending after pouring, boosting In-Distribution success from initial hesitation up to 75.0%.
+  3. **Spatial Softmax Enables From-Scratch Training**: Without pretraining, Spatial Softmax forced the convolutional filters to focus on 2D geometric centroids of objects rather than generic semantic features, achieving 75.0% ID and 65.0% Mild OOD from only 100 demonstration episodes.
+- **Decision**: **PROMOTE RUN 5 AS CHAMPION PIXEL-TO-ACTION VISUAL POLICY.**
+
 
 
 

@@ -45,25 +45,33 @@ floraflow/
 │       └── desk_scene.xml      # Tabletop scene: arm, plant, watering can, water particles
 ├── checkpoints/                # Model weights, configs, and dataset normalization stats
 ├── data/                       # HDF5 demonstration datasets
+├── docs/                       # Optimization experiment log and architecture guides
 ├── floraflow/
 │   ├── env/
-│   │   └── desk_env.py         # MuJoCo simulation environment (20 Hz control, 500 Hz physics)
+│   │   └── desk_env.py         # MuJoCo simulation environment (20 Hz control, multi-camera rendering)
 │   ├── expert/
 │   │   ├── ik_solver.py        # DLS 7-DoF Inverse Kinematics with nullspace regularization
 │   │   ├── trajectory.py       # Minimum-jerk quintic polynomial interpolator
 │   │   └── pour_planner.py     # Deterministic 9-phase pick, lift, transport, and pour planner
 │   ├── policy/
-│   │   ├── model.py            # FlowMatchingPolicy network with sinusoidal time embeddings
+│   │   ├── model.py            # FlowMatchingPolicy network (state-based)
+│   │   ├── spatial_softmax.py  # Differentiable Spatial Softmax 2D keypoint extraction layer
+│   │   ├── vision_model.py     # VisionFlowMatchingPolicy (dual-camera CNN + proprioception fusion)
 │   │   └── flow_matching.py    # Optimal Transport CFM vector field head & Euler integrator
 │   ├── data/
-│   │   └── dataset.py          # HDF5 rolling chunk dataset loader and normalizer
+│   │   ├── dataset.py          # State-based HDF5 dataset loader and normalizer
+│   │   └── vision_dataset.py   # Multi-camera HDF5 dataset loader with in-memory caching
 │   └── eval/
-│       └── evaluator.py        # Closed-loop evaluation harness and benchmark scorecard
+│       ├── evaluator.py        # State policy closed-loop evaluator and scorecard utilities
+│       └── vision_evaluator.py # Pixel-to-Action closed-loop evaluator with temporal ensembling
 ├── scripts/
-│   ├── 01_generate_demos.py    # Generates 100 expert demonstrations to HDF5
-│   ├── 02_train_policy.py      # Trains CFM action chunker policy
-│   └── 03_evaluate_policy.py   # Closed-loop benchmark across ID and OOD scenarios
-├── tests/                      # Pytest suite covering physics, math, and kinematics
+│   ├── 01_generate_demos.py    # Generates state expert demonstrations
+│   ├── 01b_generate_vision_demos.py # Generates multi-camera visual demonstrations
+│   ├── 02_train_policy.py      # Trains state Flow Matching policy
+│   ├── 02b_train_vision_policy.py   # Trains Pixel-to-Action Flow Matching policy
+│   ├── 03_evaluate_policy.py   # Evaluates state policy on ID and OOD benchmarks
+│   └── 03b_evaluate_vision_policy.py # Evaluates vision policy from raw camera pixels
+├── tests/                      # Pytest suite covering physics, kinematics, and vision backbones
 └── pyproject.toml              # Dependencies and build configuration
 ```
 
@@ -80,26 +88,52 @@ source .venv/bin/activate
 uv pip install -e .
 ```
 
-### 1. Collect Demonstrations
-Generate 500 expert demonstrations across widened workspace bounds ($87,000$ state-action transitions):
-```bash
-uv run scripts/01_generate_demos.py --num-demos 500 --output data/watering_demos_widened_500.h5 --widened-bounds
-```
+### Phase 1: State-Based Flow Matching (Oracle Coordinates)
 
-### 2. Train Flow Matching Policy
-Train the 840K-parameter vector field policy head on Apple Silicon MPS or CUDA GPU:
-```bash
-uv run scripts/02_train_policy.py --data-path data/watering_demos_widened_500.h5 --epochs 80
-```
+1. **Collect Demonstrations**:
+   Generate 500 expert demonstrations across widened workspace bounds ($87,000$ state-action transitions):
+   ```bash
+   uv run scripts/01_generate_demos.py --num-demos 500 --output data/watering_demos_widened_500.h5 --widened-bounds
+   ```
 
-### 3. Evaluate Closed-Loop Policy
-Benchmark closed-loop execution with continuous Temporal Ensembling across in-distribution and Hard out-of-distribution scenarios:
-```bash
-uv run scripts/03_evaluate_policy.py --mode both --difficulty hard --num-episodes 50
-```
+2. **Train Flow Matching Policy**:
+   Train the 840K-parameter vector field policy head on Apple Silicon MPS or CUDA GPU:
+   ```bash
+   uv run scripts/02_train_policy.py --data-path data/watering_demos_widened_500.h5 --epochs 80
+   ```
 
-### 4. Run Test Suite
-Run automated unit tests covering environment contracts, IK convergence, and flow matching calculus:
+3. **Evaluate Closed-Loop Policy**:
+   Benchmark closed-loop execution with continuous Temporal Ensembling across in-distribution and Hard out-of-distribution scenarios:
+   ```bash
+   uv run scripts/03_evaluate_policy.py --mode both --difficulty hard --num-episodes 50
+   ```
+
+---
+
+### Phase 2: Pixel-to-Action Vision Policy (Raw Camera Pixels)
+
+1. **Collect Multi-Camera Demonstrations**:
+   Generate 100 synchronized demonstration episodes ($17,400$ steps) recording dual $128 \times 128$ RGB camera streams (`third_person_cam` and `overhead_cam`) alongside 9D robot proprioception:
+   ```bash
+   uv run scripts/01b_generate_vision_demos.py --num-demos 100 --output data/watering_demos_vision_100.h5
+   ```
+
+2. **Train Vision Flow Matching Policy**:
+   Train the 1.04M-parameter VisionFlowMatchingPolicy (4-layer Spatial Softmax CNN encoders + Flow Matching ResMLP) from scratch:
+   ```bash
+   uv run scripts/02b_train_vision_policy.py --data data/watering_demos_vision_100.h5 --epochs 50 --batch-size 256
+   ```
+
+3. **Evaluate Closed-Loop Vision Policy**:
+   Benchmark closed-loop execution strictly from raw camera pixels without simulator coordinates:
+   ```bash
+   uv run scripts/03b_evaluate_vision_policy.py --mode both --ood-difficulty hard --episodes 20
+   ```
+
+---
+
+### Run Test Suite
+Run automated unit tests covering environment contracts, IK convergence, flow matching calculus, and vision backbones:
 ```bash
 uv run pytest tests/
 ```
@@ -108,14 +142,14 @@ uv run pytest tests/
 
 ## 4. Benchmark Results & Scorecards
 
-Closed-loop evaluation conducted across 20 held-out in-distribution trials and 20 out-of-distribution spatial perturbation trials (where can and plant positions were shifted outside training bounds).
+Closed-loop evaluation benchmarks conducted across held-out in-distribution trials and out-of-distribution spatial perturbation trials (where can and plant positions are shifted outside training bounds).
 
 <p align="center">
   <img src="assets/eval_policy_pour.png" width="48%" alt="Closed Loop Pour 3rd Person View"/>
   <img src="assets/eval_policy_pour_closeup.png" width="48%" alt="Closed Loop Pour Closeup View"/>
 </p>
 
-### Verification Scorecard
+### Phase 1: State Policy Scorecard (Oracle Coordinates)
 
 | Evaluation Metric | In-Distribution (Held-Out Seeds) | Hard Out-of-Distribution (5-10 cm Shifts) | Real-Time Requirement |
 | :--- | :--- | :--- | :--- |
@@ -127,9 +161,22 @@ Closed-loop evaluation conducted across 20 held-out in-distribution trials and 2
 | **Mean Inference Latency** | **3.59 ms** | **3.56 ms** | **< 50.0 ms (20 Hz)** |
 | **Real-Time Control Constraint** | **PASS** | **PASS** | Sub-15 ms target |
 
+### Phase 2: Vision Policy Scorecard (Raw Pixels, Zero Cheats)
+
+| Evaluation Metric | In-Distribution (20 Seeds) | Mild Out-of-Distribution (1-3 cm Shifts) | Hard Out-of-Distribution (5-10 cm Shifts) |
+| :--- | :--- | :--- | :--- |
+| **Total Evaluation Episodes** | 20 episodes | 20 episodes | 20 episodes |
+| **Task Success Rate** | **75.0%** (15 / 20) | **65.0%** (13 / 20) | **30.0%** (6 / 20) |
+| **Mean Maximum Tilt Angle** | **64.0°** | **65.3°** | **31.0°** |
+| **Mean Spout Alignment Error** | **16.3 cm** (2.1 cm on best run) | **16.6 cm** | **31.5 cm** (5.4 cm on best run) |
+| **Mean Fluid Particles in Pot** | **0.85** | **1.20** | **0.95** |
+| **Mean Inference Latency** | **4.83 ms** | **4.65 ms** | **4.67 ms** |
+| **Real-Time Control Constraint** | **PASS (<50 ms)** | **PASS (<50 ms)** | **PASS (<50 ms)** |
+
 ### Technical Highlights
 1. **Zero External Framework Dependencies**: The entire Flow Matching calculus (optimal transport probability paths, analytical velocity vector fields, and explicit Euler numerical ODE integration) is implemented directly in pure PyTorch.
-2. **Temporal Ensembling**: Replaces open-loop execution with continuous sliding window exponential blending ($w_i = \exp(-0.05 \cdot i)$) at every control step, eliminating velocity seams and delivering 96.0% success on aggressive 5 to 10 cm displacements.
-3. **Sub-4ms Inference Latency**: At 3.56 ms per ODE solve (10 Euler integration steps), policy inference consumes less than 8% of the 50 ms control interval at 20 Hz, leaving ample headroom for visual sensing.
-4. **Data Density over Model Size**: Expanding demonstrations to 500 episodes across widened bounds dropped vector field MSE loss by 60.7% and eliminated compounding covariate shift without increasing model parameters.
+2. **Spatial Softmax Keypoint Extraction**: 4-layer CNN encoders convert raw $128 \times 128$ frames into compact 2D keypoint coordinates without spatial flattening or parameter blowup, computing in 1.5 ms on Apple Silicon.
+3. **Temporal Ensembling**: Replaces open-loop execution with continuous sliding window exponential blending ($w_i = \exp(-0.05 \cdot i)$) at every control step, eliminating velocity seams and providing continuous trajectory adjustments.
+4. **Sub-5ms Inference Latency**: Full pixel-to-action inference executes in **4.65 ms**, consuming less than 10% of the 50 ms budget for 20 Hz control loops.
+5. **Detailed Documentation & Walkthroughs**: Full technical derivations and step-by-step experiment logs are maintained in [`docs/optimization_experiment_log.md`](docs/optimization_experiment_log.md).
 
