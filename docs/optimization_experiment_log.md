@@ -16,6 +16,8 @@ This experiment log tracks progressive improvements to FloraFlow policy accuracy
 | **Run 5 (Vision)** | Pixel-to-Action VLA (Dual-cam Spatial Softmax CNN, zero state cheats) | 100 demos (multi-cam) | 1.04M params (SSM CNN + ResMLP) | **75.0%** (15/20) | **65.0%** (Mild) / **30.0%** (Hard) | 16.3 cm / 16.6 cm | 4.65 ms | **VISION BASELINE** |
 | **Run 6 (Vision)** | Visual Shift Augmentation ($\pm 4$px bilinear affine shift) | 100 demos (multi-cam) | 1.04M params, shift-aug=4 | **85.0%** (17/20) | **34.0%** (17/50 on HARD) | 10.5 cm / 23.5 cm | 4.48 ms | **AUGMENTATION CHAMPION** |
 | **Run 7 (Vision)** | Data Scaling (300 demos, 52.2k transitions + shift aug) | 300 demos (multi-cam) | 1.04M params, shift-aug=4 | **90.0%** (18/20) | **80.0%** (40/50 on HARD) | 10.0 cm / 12.0 cm | 4.77 ms | **CURRENT VISION CHAMPION** |
+| **Run 8 (Vision)** | Tri-Camera VLA (Third-Person + Overhead + Eye-in-Hand Wrist Cam) | 300 demos (3-cam) | 1.14M params, shift-aug=4 | **90.0%** (18/20) | **76.0%** (38/50 on HARD) | 10.1 cm / 13.6 cm | 5.03 ms | **EVALUATED** (Wrist Ablation) |
+
 
 ---
 
@@ -285,6 +287,46 @@ HARD OUT-OF-DISTRIBUTION (50 episodes, 5-10 cm shifts):
   2. **Irreducible Error Floor Broken**: Training loss collapsed by 55.1% to 0.05633 MSE, directly correlating with improved end-effector guidance and container approach stability.
   3. **Sub-5 ms Real-Time Budget Preserved**: Even with higher accuracy and complex trajectory dynamics, inference latency remained at 4.53 ms to 4.77 ms, running at over 200 Hz.
 - **Decision**: **PROMOTE RUN 7 AS CURRENT VISION CHAMPION POLICY.**
+
+---
+
+## 12. Run 8: Tri-Camera VLA Policy (Eye-in-Hand Wrist Camera Ablation)
+
+- **Hypothesis**: Adding an egocentric wrist camera ([`wrist_cam`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/assets/franka_emika_panda/panda.xml#L213) mounted on `panda_hand`) to the two fixed viewpoints (`third_person_cam` and `overhead_cam`) will eliminate container grasp misses at extreme workspace boundaries by providing dynamic resolution scaling and direct visual feedback through the fingertips.
+- **Architecture**:
+  - Visual Backbone: 3 independent 4-layer [`SpatialSoftmaxConvNet`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/policy/vision_model.py#L22) encoders ($3 \times 64 = 192$ coordinate features).
+  - Trainable parameters: 1,140,643 (~1.14M).
+  - Fused Observation: 192 visual features + 9D proprioception (7 joint angles, 1 gripper width, 1 progress feature).
+- **Demonstration Dataset**:
+  - Path: [`data/watering_demos_vision_3cam_300.h5`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/data/watering_demos_vision_3cam_300.h5) (300 episodes, 52,200 transitions, 1,345.8 MB).
+- **Training Progression**:
+  - Script: [`scripts/02b_train_vision_policy.py`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/scripts/02b_train_vision_policy.py) with `--shift-aug 4 --epochs 40`
+  - Checkpoint: [`checkpoints/run8_3cam/best_vision_policy.pt`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/checkpoints/run8_3cam/best_vision_policy.pt)
+  - Training Duration: 40 epochs (3,645.7 seconds, ~60.7 minutes)
+  - Best Training Loss: **0.05273 MSE** (new all-time record low for visual policies)
+- **Benchmark Evaluation Results**:
+  ```text
+  IN-DISTRIBUTION (Held-out seeds 100-119, 20 episodes):
+  - Success Rate:            90.0% (18 / 20)  [Matches Run 7 champion]
+  - Mean Spout Alignment:    10.1 cm
+  - Max Tilt Angle:          87.9 deg
+  - Particles in Pot:        0.60
+  - Inference Latency:       5.00 ms          [Real-time PASS]
+
+  HARD OUT-OF-DISTRIBUTION (5-10 cm aggressive shifts, 50 episodes):
+  - Success Rate:            76.0% (38 / 50)  [-4.0% vs Run 7 champion]
+  - Mean Spout Alignment:    13.6 cm
+  - Max Tilt Angle:          72.4 deg
+  - Particles in Pot:        0.36
+  - Inference Latency:       5.03 ms          [Real-time PASS]
+  ```
+- **Seed by Seed Comparative Analysis (Run 7 vs Run 8)**:
+  - Where the wrist camera succeeded: On Seed 244 (extreme table edge), Run 7 suffered a complete grasp miss (41.2 cm distance, 11.2 deg tilt). With the wrist camera in Run 8, Seed 244 passed with 8.1 cm alignment. Seed 239 also improved from a 17.2 cm fail to an 8.6 cm pass.
+  - Where the wrist camera degraded: Five seeds (206, 229, 235, 237, 240) that passed in Run 7 failed in Run 8 due to transit deviations.
+- **Root Cause Analysis (Egocentric Optical Non-Stationarity)**:
+  Static cameras (`overhead_cam` and `third_person_cam`) provide a globally invariant coordinate anchor for the entire desk workspace. An eye-in-hand camera moves with the arm. During transit and approach, small differences in arm joint velocities create large optical flow swings and perspective rotations in the wrist frame. Without pretraining, the Spatial Softmax keypoint layer is more susceptible to egocentric background clutter and rotational shift than the fixed viewpoints.
+- **Decision**: **RUN 7 (DUAL-CAMERA: THIRD-PERSON + OVERHEAD) REMAINS CHAMPION (80.0% Hard OOD vs 76.0% Tri-Camera). Dual-camera configuration retained as primary production architecture.**
+
 
 
 

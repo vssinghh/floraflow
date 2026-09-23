@@ -24,6 +24,7 @@ def generate_vision_demonstrations(
     start_seed: int = 0,
     widened_bounds: bool = True,
     resolution: Tuple[int, int] = (128, 128),
+    cameras: Tuple[str, ...] = ("third_person_cam", "overhead_cam", "wrist_cam"),
 ) -> None:
     """Collect and persist visual demonstrations with multi-camera streams.
 
@@ -33,6 +34,7 @@ def generate_vision_demonstrations(
         start_seed: Initial random seed.
         widened_bounds: Whether to sample from widened tabletop workspace bounds.
         resolution: Camera image resolution (width, height).
+        cameras: Tuple of camera names to capture.
     """
     out_file = Path(output_path).resolve()
     out_file.parent.mkdir(parents=True, exist_ok=True)
@@ -50,7 +52,7 @@ def generate_vision_demonstrations(
         }
         print("Using WIDENED workspace bounds for visual demonstration collection.")
 
-    cameras = ("third_person_cam", "overhead_cam")
+    cameras = tuple(cameras)
     env = DeskWateringEnv(
         control_hz=20,
         can_pos_range=can_range,
@@ -186,6 +188,12 @@ def main() -> None:
     parser.add_argument("--start-seed", type=int, default=0, help="Initial random seed")
     parser.add_argument("--narrow-bounds", action="store_true", help="Use narrow nominal bounds instead of widened")
     parser.add_argument("--resolution", type=int, default=128, help="Square camera resolution in pixels")
+    parser.add_argument(
+        "--cameras",
+        nargs="+",
+        default=["third_person_cam", "overhead_cam", "wrist_cam"],
+        help="Names of cameras to capture",
+    )
     args = parser.parse_args()
 
     generate_vision_demonstrations(
@@ -194,6 +202,7 @@ def main() -> None:
         start_seed=args.start_seed,
         widened_bounds=not args.narrow_bounds,
         resolution=(args.resolution, args.resolution),
+        cameras=tuple(args.cameras),
     )
 
 

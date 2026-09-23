@@ -37,7 +37,7 @@ def train_vision_policy(
     gripper_weight: float = 2.5,
     shift_aug: int = 4,
     device_str: str = "auto",
-    cameras: Tuple[str, ...] = ("third_person_cam", "overhead_cam"),
+    cameras: Optional[Tuple[str, ...]] = None,
 ) -> None:
     """Train Vision Flow Matching action chunker policy."""
     if device_str == "auto":
@@ -54,6 +54,15 @@ def train_vision_policy(
 
     save_path = Path(save_dir).resolve()
     save_path.mkdir(parents=True, exist_ok=True)
+
+    if cameras is None:
+        import h5py
+        with h5py.File(data_path, "r") as f:
+            if "cameras" in f.attrs:
+                cameras = tuple(f.attrs["cameras"])
+            else:
+                cameras = ("third_person_cam", "overhead_cam")
+    print(f"Active cameras: {cameras}")
 
     # 1. Load Vision Dataset
     print(f"Loading visual demonstration dataset from: {data_path}")
@@ -197,6 +206,7 @@ def main() -> None:
     parser.add_argument("--hidden-dim", type=int, default=256, help="Hidden dimension of ResMLP backbone")
     parser.add_argument("--gripper-weight", type=float, default=2.5, help="Gripper loss dimension weight")
     parser.add_argument("--shift-aug", type=int, default=4, help="Maximum random shift pixels for visual data augmentation")
+    parser.add_argument("--cameras", nargs="+", default=None, help="Names of cameras to train with (defaults to auto-detect from dataset)")
     parser.add_argument("--device", type=str, default="auto", help="Compute device: auto, cpu, cuda, or mps")
     args = parser.parse_args()
 
@@ -211,6 +221,7 @@ def main() -> None:
         gripper_weight=args.gripper_weight,
         shift_aug=args.shift_aug,
         device_str=args.device,
+        cameras=tuple(args.cameras) if args.cameras is not None else None,
     )
 
 

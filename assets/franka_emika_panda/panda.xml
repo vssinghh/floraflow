@@ -210,6 +210,7 @@
                     <body name="hand" pos="0 0 0.107" quat="0.9238795 0 0 -0.3826834">
                       <inertial mass="0.73" pos="-0.01 0 0.03" diaginertia="0.001 0.0025 0.0017"/>
                       <site name="pinch" pos="0 0 0.105" size="0.005" rgba="1 0 0 1"/>
+                      <camera name="wrist_cam" pos="0.05 0 0.04" xyaxes="0 -1 0 -0.79 0 -0.61" fovy="75"/>
                       <geom mesh="hand_0" material="off_white" class="visual"/>
                       <geom mesh="hand_1" material="black" class="visual"/>
                       <geom mesh="hand_2" material="black" class="visual"/>

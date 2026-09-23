@@ -105,3 +105,43 @@ def test_random_shifter_preserves_shape() -> None:
     # Zero shift should return exact tensor
     no_shift = RandomShifter(max_shift=0)
     assert torch.allclose(no_shift(x), x)
+
+
+def test_tri_camera_vision_policy_and_env() -> None:
+    """Test policy and environment with 3 cameras including wrist_cam."""
+    from floraflow.env.desk_env import DeskWateringEnv
+    cameras = ("third_person_cam", "overhead_cam", "wrist_cam")
+
+    # Verify environment produces all three camera views
+    env = DeskWateringEnv(include_rgb=True, rgb_cameras=cameras, rgb_resolution=(64, 64))
+    obs = env.reset(seed=42)
+    for cam in cameras:
+        assert f"rgb_{cam}" in obs
+        assert obs[f"rgb_{cam}"].shape == (64, 64, 3)
+
+    # Verify policy creates 3 encoders and runs ODE integration
+    policy = VisionFlowMatchingPolicy(
+        act_dim=8,
+        horizon=8,
+        proprio_dim=9,
+        num_keypoints=16,
+        vision_feat_dim=32,
+        proprio_feat_dim=32,
+        hidden_dim=128,
+        num_blocks=2,
+        cameras=cameras,
+    )
+    assert len(policy.encoders) == 3
+    assert policy.fused_dim == 3 * 32 + 32  # 3 cameras * 32 + proprio 32 = 128
+
+    b = 2
+    batch_obs = {
+        f"rgb_{cam}": torch.randint(0, 256, (b, 128, 128, 3), dtype=torch.uint8)
+        for cam in cameras
+    }
+    batch_obs["proprio"] = torch.randn(b, 9)
+
+    cfm = ConditionalFlowMatcher()
+    actions = cfm.sample(policy, batch_obs, horizon=8, act_dim=8, num_steps=2)
+    assert actions.shape == (b, 8, 8)
+
