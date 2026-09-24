@@ -37,6 +37,8 @@ def train_vision_policy(
     gripper_weight: float = 2.5,
     shift_aug: int = 4,
     use_cross_attention: bool = False,
+    camera_dropout: float = 0.0,
+    dropout_cameras: Tuple[str, ...] = ("wrist_cam",),
     device_str: str = "auto",
     cameras: Optional[Tuple[str, ...]] = None,
 ) -> None:
@@ -99,10 +101,14 @@ def train_vision_policy(
         num_blocks=num_blocks,
         cameras=cameras,
         use_cross_attention=use_cross_attention,
+        camera_dropout=camera_dropout,
+        dropout_cameras=dropout_cameras,
     ).to(device)
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Vision policy initialized with {total_params:,} trainable parameters.")
+    if camera_dropout > 0.0:
+        print(f"Modality masking active: Camera dropout p={camera_dropout:.2f} on {dropout_cameras}.")
 
     shifter = RandomShifter(max_shift=shift_aug) if shift_aug > 0 else None
     if shifter is not None:
@@ -188,6 +194,8 @@ def train_vision_policy(
                         "gripper_weight": gripper_weight,
                         "cameras": list(cameras),
                         "use_cross_attention": use_cross_attention,
+                        "camera_dropout": camera_dropout,
+                        "dropout_cameras": list(dropout_cameras),
                     },
                     "stats": dataset.stats,
                 },
@@ -210,6 +218,8 @@ def main() -> None:
     parser.add_argument("--gripper-weight", type=float, default=2.5, help="Gripper loss dimension weight")
     parser.add_argument("--shift-aug", type=int, default=4, help="Maximum random shift pixels for visual data augmentation")
     parser.add_argument("--use-cross-attention", action="store_true", help="Enable Multi-Camera Multi-Head Cross-Attention fusion")
+    parser.add_argument("--camera-dropout", type=float, default=0.0, help="Camera dropout probability during training")
+    parser.add_argument("--dropout-cameras", nargs="+", default=["wrist_cam"], help="Cameras eligible for dropout")
     parser.add_argument("--cameras", nargs="+", default=None, help="Names of cameras to train with (defaults to auto-detect from dataset)")
     parser.add_argument("--device", type=str, default="auto", help="Compute device: auto, cpu, cuda, or mps")
     args = parser.parse_args()
@@ -225,6 +235,8 @@ def main() -> None:
         gripper_weight=args.gripper_weight,
         shift_aug=args.shift_aug,
         use_cross_attention=args.use_cross_attention,
+        camera_dropout=args.camera_dropout,
+        dropout_cameras=tuple(args.dropout_cameras),
         device_str=args.device,
         cameras=tuple(args.cameras) if args.cameras is not None else None,
     )

@@ -193,3 +193,66 @@ def test_multi_camera_cross_attention_policy() -> None:
     assert actions.shape == (b, 8, 8)
 
 
+def test_camera_dropout_and_modality_masking() -> None:
+    """Test that camera dropout masks wrist_cam during training and turns off during evaluation."""
+    cameras = ("third_person_cam", "overhead_cam", "wrist_cam")
+    policy = VisionFlowMatchingPolicy(
+        act_dim=8,
+        horizon=8,
+        proprio_dim=9,
+        num_keypoints=16,
+        vision_feat_dim=32,
+        proprio_feat_dim=32,
+        hidden_dim=128,
+        num_blocks=2,
+        cameras=cameras,
+        use_cross_attention=True,
+        attn_heads=4,
+        camera_dropout=1.0,  # 100% dropout of wrist_cam during training
+        dropout_cameras=("wrist_cam",),
+    )
+
+    b = 4
+    batch_obs = {
+        f"rgb_{cam}": torch.randint(0, 256, (b, 128, 128, 3), dtype=torch.uint8)
+        for cam in cameras
+    }
+    batch_obs["proprio"] = torch.randn(b, 9)
+
+    # 1. Training mode with 100% dropout on wrist_cam
+    policy.train()
+    fused_train = policy.extract_obs_features(batch_obs)
+    # Check that fused features have expected total dimension:
+    # context (32) + 3 * 32 + proprio (32) = 160
+    assert fused_train.shape == (b, 160)
+
+    # In all_vis (offset 32 to 32+96), wrist_cam is the third camera (indices 32+64 to 32+96 = 96 to 128)
+    wrist_slice = fused_train[:, 96:128]
+    assert torch.all(wrist_slice == 0.0)
+
+    # Non-dropped cameras (third_person_cam and overhead_cam) should NOT be all zero
+    third_person_slice = fused_train[:, 32:64]
+    overhead_slice = fused_train[:, 64:96]
+    assert not torch.all(third_person_slice == 0.0)
+    assert not torch.all(overhead_slice == 0.0)
+
+    # Forward pass in training mode
+    x_t = torch.randn(b, 8, 8)
+    t = torch.rand(b)
+    v_pred = policy(x_t, t, batch_obs)
+    assert v_pred.shape == (b, 8, 8)
+
+    # 2. Evaluation mode: camera dropout must be deactivated
+    policy.eval()
+    fused_eval = policy.extract_obs_features(batch_obs)
+    wrist_slice_eval = fused_eval[:, 96:128]
+    # During eval, wrist_cam is active so it must not be all zeros
+    assert not torch.all(wrist_slice_eval == 0.0)
+
+    # Check attention weights during eval: wrist_cam has non-zero attention
+    weights_eval = policy.get_attention_weights(batch_obs)
+    assert weights_eval is not None
+    assert torch.all(weights_eval[:, :, 2] > 0.0)
+
+
+

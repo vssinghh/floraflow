@@ -114,19 +114,27 @@ class MultiCameraCrossAttention(nn.Module):
         self,
         cam_tokens: torch.Tensor,
         proprio_query: torch.Tensor,
+        key_padding_mask: Optional[torch.Tensor] = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         """Forward pass.
 
         Args:
             cam_tokens: Camera tokens of shape (B, num_cameras, feat_dim).
             proprio_query: Query token of shape (B, 1, feat_dim).
+            key_padding_mask: Optional boolean tensor of shape (B, num_cameras) indicating
+                which camera tokens to ignore during cross-attention (True = ignore).
 
         Returns:
             context: Attended visual context of shape (B, feat_dim).
             attn_weights: Attention distribution of shape (B, 1, num_cameras).
         """
         tokens = cam_tokens + self.camera_emb.unsqueeze(0)
-        attn_out, attn_weights = self.mha(query=proprio_query, key=tokens, value=tokens)
+        attn_out, attn_weights = self.mha(
+            query=proprio_query,
+            key=tokens,
+            value=tokens,
+            key_padding_mask=key_padding_mask,
+        )
         context = self.norm(attn_out.squeeze(1))
         return context, attn_weights
 
@@ -153,6 +161,8 @@ class VisionFlowMatchingPolicy(nn.Module):
         cameras: Tuple[str, ...] = ("third_person_cam", "overhead_cam"),
         use_cross_attention: bool = False,
         attn_heads: int = 4,
+        camera_dropout: float = 0.0,
+        dropout_cameras: Tuple[str, ...] = ("wrist_cam",),
     ) -> None:
         super().__init__()
         self.act_dim = act_dim
@@ -161,6 +171,8 @@ class VisionFlowMatchingPolicy(nn.Module):
         self.cameras = cameras
         self.use_cross_attention = use_cross_attention
         self.attn_heads = attn_heads
+        self.camera_dropout = camera_dropout
+        self.dropout_cameras = tuple(dropout_cameras)
 
         # Visual encoders for each camera viewpoint
         self.encoders = nn.ModuleDict({
@@ -252,14 +264,34 @@ class VisionFlowMatchingPolicy(nn.Module):
             feat = self.encoders[cam](img)
             vis_features.append(feat)
 
-        all_vis = torch.cat(vis_features, dim=-1)
         proprio = obs["proprio"]
         proprio_feat = self.proprio_encoder(proprio)
+
+        padding_mask = None
+        if self.training and self.camera_dropout > 0.0:
+            b = proprio.shape[0]
+            drop_decisions = torch.zeros((b, len(self.cameras)), dtype=torch.bool, device=proprio.device)
+            for idx, cam in enumerate(self.cameras):
+                if cam in self.dropout_cameras:
+                    drop_decisions[:, idx] = torch.rand(b, device=proprio.device) < self.camera_dropout
+
+            # Ensure at least one camera remains active for every sample
+            all_dropped = drop_decisions.all(dim=-1)
+            if all_dropped.any():
+                drop_decisions[all_dropped, 0] = False
+
+            for idx in range(len(self.cameras)):
+                keep_factor = (~drop_decisions[:, idx]).unsqueeze(1).float()
+                vis_features[idx] = vis_features[idx] * keep_factor
+
+            padding_mask = drop_decisions
+
+        all_vis = torch.cat(vis_features, dim=-1)
 
         if self.use_cross_attention and self.cross_attn is not None:
             cam_tokens = torch.stack(vis_features, dim=1)
             proprio_query = proprio_feat.unsqueeze(1)
-            context, _ = self.cross_attn(cam_tokens, proprio_query)
+            context, _ = self.cross_attn(cam_tokens, proprio_query, key_padding_mask=padding_mask)
             return torch.cat([context, all_vis, proprio_feat], dim=-1)
 
         return torch.cat([all_vis, proprio_feat], dim=-1)
@@ -267,11 +299,13 @@ class VisionFlowMatchingPolicy(nn.Module):
     def get_attention_weights(
         self,
         obs: Dict[str, torch.Tensor],
+        key_padding_mask: Optional[torch.Tensor] = None,
     ) -> Optional[torch.Tensor]:
         """Extract multi-head cross-attention distribution over cameras.
 
         Args:
             obs: Observation dictionary with camera images and proprioception.
+            key_padding_mask: Optional mask of shape (B, num_cameras) to ignore camera views.
 
         Returns:
             attn_weights: Tensor of shape (B, 1, num_cameras), or None if attention disabled.
@@ -293,7 +327,7 @@ class VisionFlowMatchingPolicy(nn.Module):
         proprio = obs["proprio"]
         proprio_feat = self.proprio_encoder(proprio)
         proprio_query = proprio_feat.unsqueeze(1)
-        _, attn_weights = self.cross_attn(cam_tokens, proprio_query)
+        _, attn_weights = self.cross_attn(cam_tokens, proprio_query, key_padding_mask=key_padding_mask)
         return attn_weights
 
     def forward(

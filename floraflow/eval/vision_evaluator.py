@@ -68,6 +68,9 @@ class VisionPolicyEvaluator:
             num_blocks=config["num_blocks"],
             cameras=self.cameras,
             use_cross_attention=config.get("use_cross_attention", False),
+            attn_heads=config.get("attn_heads", 4),
+            camera_dropout=config.get("camera_dropout", 0.0),
+            dropout_cameras=tuple(config.get("dropout_cameras", ["wrist_cam"])),
         ).to(self.device)
         self.model.load_state_dict(ckpt["model_state_dict"])
         self.model.eval()
