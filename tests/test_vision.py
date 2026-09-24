@@ -145,3 +145,51 @@ def test_tri_camera_vision_policy_and_env() -> None:
     actions = cfm.sample(policy, batch_obs, horizon=8, act_dim=8, num_steps=2)
     assert actions.shape == (b, 8, 8)
 
+
+def test_multi_camera_cross_attention_policy() -> None:
+    """Test policy with Multi-Head Cross-Attention across 3 camera streams."""
+    cameras = ("third_person_cam", "overhead_cam", "wrist_cam")
+    policy = VisionFlowMatchingPolicy(
+        act_dim=8,
+        horizon=8,
+        proprio_dim=9,
+        num_keypoints=16,
+        vision_feat_dim=32,
+        proprio_feat_dim=32,
+        hidden_dim=128,
+        num_blocks=2,
+        cameras=cameras,
+        use_cross_attention=True,
+        attn_heads=4,
+    )
+
+    assert policy.use_cross_attention is True
+    assert policy.cross_attn is not None
+    assert policy.fused_dim == 32 + 3 * 32 + 32  # context (32) + all_vis (96) + proprio (32) = 160
+
+    b = 2
+    batch_obs = {
+        f"rgb_{cam}": torch.randint(0, 256, (b, 128, 128, 3), dtype=torch.uint8)
+        for cam in cameras
+    }
+    batch_obs["proprio"] = torch.randn(b, 9)
+    x_t = torch.randn(b, 8, 8)
+    t = torch.rand(b)
+
+    # Forward velocity field prediction
+    v_pred = policy(x_t, t, batch_obs)
+    assert v_pred.shape == (b, 8, 8)
+
+    # Extract attention weights
+    weights = policy.get_attention_weights(batch_obs)
+    assert weights is not None
+    assert weights.shape == (b, 1, 3)
+    # Weights should sum to 1.0 across the 3 cameras
+    assert torch.allclose(weights.sum(dim=-1), torch.ones(b, 1), atol=1e-4)
+
+    # Test Euler ODE sampling
+    cfm = ConditionalFlowMatcher()
+    actions = cfm.sample(policy, batch_obs, horizon=8, act_dim=8, num_steps=2)
+    assert actions.shape == (b, 8, 8)
+
+

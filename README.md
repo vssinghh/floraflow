@@ -181,6 +181,8 @@ Closed-loop evaluation benchmarks conducted across held-out in-distribution tria
 | **Run 6** | 100 Demos + Bilinear Shift Aug ($\pm 4$px) | 85.0% (17 / 20) | 34.0% (17 / 50 on Hard) | 10.5 cm / 23.5 cm | 4.48 ms |
 | **Run 7 (Champion)** | 300 Demos + Shift Aug ($\pm 4$px, Dual-Cam) | **90.0%** (18 / 20) | **80.0%** (40 / 50 on Hard) | **10.0 cm** / **12.0 cm** | **4.77 ms** |
 | **Run 8** | 300 Demos + Shift Aug (Tri-Cam: + Wrist Cam) | **90.0%** (18 / 20) | **76.0%** (38 / 50 on Hard) | 10.1 cm / 13.6 cm | 5.03 ms |
+| **Run 9 (ID Champion)** | 300 Demos + Shift Aug (Tri-Cam + 4-Head Cross-Attn) | **100.0%** (20 / 20) | **72.0%** (36 / 50 on Hard) | **7.7 cm** / 15.1 cm | 5.27 ms |
+
 
 
 

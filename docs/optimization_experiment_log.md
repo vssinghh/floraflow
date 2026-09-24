@@ -17,6 +17,8 @@ This experiment log tracks progressive improvements to FloraFlow policy accuracy
 | **Run 6 (Vision)** | Visual Shift Augmentation ($\pm 4$px bilinear affine shift) | 100 demos (multi-cam) | 1.04M params, shift-aug=4 | **85.0%** (17/20) | **34.0%** (17/50 on HARD) | 10.5 cm / 23.5 cm | 4.48 ms | **AUGMENTATION CHAMPION** |
 | **Run 7 (Vision)** | Data Scaling (300 demos, 52.2k transitions + shift aug) | 300 demos (multi-cam) | 1.04M params, shift-aug=4 | **90.0%** (18/20) | **80.0%** (40/50 on HARD) | 10.0 cm / 12.0 cm | 4.77 ms | **CURRENT VISION CHAMPION** |
 | **Run 8 (Vision)** | Tri-Camera VLA (Third-Person + Overhead + Eye-in-Hand Wrist Cam) | 300 demos (3-cam) | 1.14M params, shift-aug=4 | **90.0%** (18/20) | **76.0%** (38/50 on HARD) | 10.1 cm / 13.6 cm | 5.03 ms | **EVALUATED** (Wrist Ablation) |
+| **Run 9 (Vision)** | Multi-Camera Cross-Attention (4-head attention over 3 cams) | 300 demos (3-cam) | 1.17M params, shift-aug=4 | **100.0%** (20/20) | **72.0%** (36/50 on HARD) | 7.7 cm / 15.1 cm | 5.27 ms | **PERFECT ID CHAMPION** |
+
 
 
 ---
@@ -326,6 +328,48 @@ HARD OUT-OF-DISTRIBUTION (50 episodes, 5-10 cm shifts):
 - **Root Cause Analysis (Egocentric Optical Non-Stationarity)**:
   Static cameras (`overhead_cam` and `third_person_cam`) provide a globally invariant coordinate anchor for the entire desk workspace. An eye-in-hand camera moves with the arm. During transit and approach, small differences in arm joint velocities create large optical flow swings and perspective rotations in the wrist frame. Without pretraining, the Spatial Softmax keypoint layer is more susceptible to egocentric background clutter and rotational shift than the fixed viewpoints.
 - **Decision**: **RUN 7 (DUAL-CAMERA: THIRD-PERSON + OVERHEAD) REMAINS CHAMPION (80.0% Hard OOD vs 76.0% Tri-Camera). Dual-camera configuration retained as primary production architecture.**
+
+---
+
+## 13. Run 9: Multi-Camera Transformer Cross-Attention (Tri-Camera VLA)
+
+- **Hypothesis**: Replacing static feature concatenation with Multi-Head Cross-Attention ([`MultiCameraCrossAttention`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/policy/vision_model.py#L88)) will allow the robot state query ($Q$) to dynamically prioritize static viewpoints during transit while shifting attention to the wrist camera ($V_{wrist}$) near contact, eliminating the optical shear failure modes of Run 8.
+- **Architecture**:
+  - Model: [`VisionFlowMatchingPolicy`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/policy/vision_model.py#L136) with `--use-cross-attention`
+  - Attention Heads: 4 parallel heads ($d_{head} = 16$, $d_{model} = 64$)
+  - Positional Encodings: Learnable camera ID embeddings ($3 \times 64$)
+  - Feature Fusion: Residual concatenation of attended context ($64\text{d}$), raw multi-view coordinates ($192\text{d}$), and proprioception ($64\text{d}$) totaling 320 dimensions.
+  - Parameter Count: 1,173,987 (~1.17M).
+- **Demonstration Dataset**:
+  - Path: [`data/watering_demos_vision_3cam_300.h5`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/data/watering_demos_vision_3cam_300.h5) (300 episodes, 52,200 transitions, 1,345.8 MB).
+- **Training Progression**:
+  - Script: [`scripts/02b_train_vision_policy.py`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/scripts/02b_train_vision_policy.py) with `--shift-aug 4 --epochs 40 --use-cross-attention`
+  - Checkpoint: [`checkpoints/run9_attn_3cam/best_vision_policy.pt`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/checkpoints/run9_attn_3cam/best_vision_policy.pt)
+  - Training Duration: 40 epochs (3,517.2 seconds, ~58.6 minutes)
+  - Best Training Loss: **0.04720 MSE** (all-time project record low, -10.5% vs Run 8, -16.2% vs Run 7)
+  - Vector Field Velocity: $|v| = 3.792$ converged to $|u| = 3.853$
+- **Benchmark Evaluation Results**:
+  ```text
+  IN-DISTRIBUTION (Held-out seeds 100-119, 20 episodes):
+  - Success Rate:            100.0% (20 / 20)  [PERFECT SCORE, +10.0% over Runs 7 & 8]
+  - Mean Spout Alignment:    7.7 cm            [Project record for visual precision]
+  - Max Tilt Angle:          91.8 deg
+  - Particles in Pot:        0.60
+  - Inference Latency:       5.26 ms           [Real-time PASS (<50ms budget)]
+
+  HARD OUT-OF-DISTRIBUTION (5-10 cm aggressive shifts, 50 episodes):
+  - Success Rate:            72.0% (36 / 50)
+  - Mean Spout Alignment:    15.1 cm
+  - Max Tilt Angle:          74.3 deg
+  - Particles in Pot:        0.58
+  - Inference Latency:       5.27 ms           [Real-time PASS (<50ms budget)]
+  ```
+- **Key Empirical Insights**:
+  1. **Perfect In-Distribution Score (100.0%)**: Multi-Head Attention achieved flawless performance across all held-out in-distribution test episodes (20 out of 20), tightening mean spout alignment to 7.7 cm.
+  2. **Grasping Rescues Preserved**: The attention query successfully prioritized the wrist camera during grasp descent. Extreme edge cases like Seed 244 (which missed completely by 41.2 cm in Run 7) passed with 9.3 cm alignment and 93.5 degree pour. Seed 239, Seed 240, and Seed 237 all passed cleanly.
+  3. **The Transport Attention Trade-off**: Under extreme 10 cm plant pot shifts (seeds 225, 226, 229, 235, 249), the robot successfully grasped the can and tilted (70 to 90 degrees), but poured 15 to 30 cm away from the pot. Because the can reservoir obscures the pot in the wrist camera after lifting, queries during the transport phase must maintain high attention on the static cameras. On 300 demonstrations, the attention heads over-indexed on the wrist/can tokens relative to the static pot tokens during the carry phase.
+- **Decision**: **RUN 9 IS CROWNED IN-DISTRIBUTION CHAMPION (100.0% ID, 7.7 cm alignment). RUN 7 REMAINS OUT-OF-DISTRIBUTION CHAMPION (80.0% Hard OOD).**
+
 
 
 

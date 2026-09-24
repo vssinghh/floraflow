@@ -36,6 +36,7 @@ def train_vision_policy(
     num_blocks: int = 4,
     gripper_weight: float = 2.5,
     shift_aug: int = 4,
+    use_cross_attention: bool = False,
     device_str: str = "auto",
     cameras: Optional[Tuple[str, ...]] = None,
 ) -> None:
@@ -97,6 +98,7 @@ def train_vision_policy(
         hidden_dim=hidden_dim,
         num_blocks=num_blocks,
         cameras=cameras,
+        use_cross_attention=use_cross_attention,
     ).to(device)
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
@@ -185,6 +187,7 @@ def train_vision_policy(
                         "num_blocks": num_blocks,
                         "gripper_weight": gripper_weight,
                         "cameras": list(cameras),
+                        "use_cross_attention": use_cross_attention,
                     },
                     "stats": dataset.stats,
                 },
@@ -206,6 +209,7 @@ def main() -> None:
     parser.add_argument("--hidden-dim", type=int, default=256, help="Hidden dimension of ResMLP backbone")
     parser.add_argument("--gripper-weight", type=float, default=2.5, help="Gripper loss dimension weight")
     parser.add_argument("--shift-aug", type=int, default=4, help="Maximum random shift pixels for visual data augmentation")
+    parser.add_argument("--use-cross-attention", action="store_true", help="Enable Multi-Camera Multi-Head Cross-Attention fusion")
     parser.add_argument("--cameras", nargs="+", default=None, help="Names of cameras to train with (defaults to auto-detect from dataset)")
     parser.add_argument("--device", type=str, default="auto", help="Compute device: auto, cpu, cuda, or mps")
     args = parser.parse_args()
@@ -220,6 +224,7 @@ def main() -> None:
         hidden_dim=args.hidden_dim,
         gripper_weight=args.gripper_weight,
         shift_aug=args.shift_aug,
+        use_cross_attention=args.use_cross_attention,
         device_str=args.device,
         cameras=tuple(args.cameras) if args.cameras is not None else None,
     )
