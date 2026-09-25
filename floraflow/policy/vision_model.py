@@ -29,9 +29,11 @@ class SpatialSoftmaxConvNet(nn.Module):
         num_keypoints: int = 32,
         feature_dim: int = 64,
         temperature: float = 1.0,
+        keypoint_noise: float = 0.0,
     ) -> None:
         super().__init__()
         self.num_keypoints = num_keypoints
+        self.keypoint_noise = keypoint_noise
 
         # Conv1: 128x128 -> 64x64
         self.conv1 = nn.Conv2d(in_channels, 32, kernel_size=5, stride=2, padding=2)
@@ -81,6 +83,8 @@ class SpatialSoftmaxConvNet(nn.Module):
         h = self.act(self.norm4(self.conv4(h)))
 
         keypoints = self.spatial_softmax(h)
+        if self.training and self.keypoint_noise > 0.0:
+            keypoints = keypoints + torch.randn_like(keypoints) * self.keypoint_noise
         features = self.proj(keypoints)
         return features
 
@@ -93,11 +97,18 @@ class MultiCameraCrossAttention(nn.Module):
         feat_dim: int = 64,
         num_heads: int = 4,
         num_cameras: int = 3,
+        query_dim: Optional[int] = None,
     ) -> None:
         super().__init__()
         self.feat_dim = feat_dim
         self.num_heads = num_heads
         self.num_cameras = num_cameras
+
+        # Optional query projection when proprioception feature dim differs from visual feat_dim
+        if query_dim is not None and query_dim != feat_dim:
+            self.query_proj: Optional[nn.Linear] = nn.Linear(query_dim, feat_dim)
+        else:
+            self.query_proj = None
 
         # Learnable camera ID positional embeddings
         self.camera_emb = nn.Parameter(torch.randn(num_cameras, feat_dim) * 0.02)
@@ -120,7 +131,7 @@ class MultiCameraCrossAttention(nn.Module):
 
         Args:
             cam_tokens: Camera tokens of shape (B, num_cameras, feat_dim).
-            proprio_query: Query token of shape (B, 1, feat_dim).
+            proprio_query: Query token of shape (B, 1, query_dim).
             key_padding_mask: Optional boolean tensor of shape (B, num_cameras) indicating
                 which camera tokens to ignore during cross-attention (True = ignore).
 
@@ -128,6 +139,8 @@ class MultiCameraCrossAttention(nn.Module):
             context: Attended visual context of shape (B, feat_dim).
             attn_weights: Attention distribution of shape (B, 1, num_cameras).
         """
+        if self.query_proj is not None:
+            proprio_query = self.query_proj(proprio_query)
         tokens = cam_tokens + self.camera_emb.unsqueeze(0)
         attn_out, attn_weights = self.mha(
             query=proprio_query,
@@ -158,6 +171,7 @@ class VisionFlowMatchingPolicy(nn.Module):
         time_dim: int = 64,
         num_blocks: int = 4,
         dropout: float = 0.0,
+        keypoint_noise: float = 0.0,
         cameras: Tuple[str, ...] = ("third_person_cam", "overhead_cam"),
         use_cross_attention: bool = False,
         attn_heads: int = 4,
@@ -177,6 +191,8 @@ class VisionFlowMatchingPolicy(nn.Module):
         self.dropout_cameras = tuple(dropout_cameras)
         self.use_aux_pose = use_aux_pose
         self.aux_pose_dim = aux_pose_dim
+        self.dropout_p = dropout
+        self.keypoint_noise = keypoint_noise
         self._last_aux_preds: Tuple[torch.Tensor, ...] = ()
 
         # Visual encoders for each camera viewpoint
@@ -185,6 +201,7 @@ class VisionFlowMatchingPolicy(nn.Module):
                 in_channels=3,
                 num_keypoints=num_keypoints,
                 feature_dim=vision_feat_dim,
+                keypoint_noise=keypoint_noise,
             )
             for cam in cameras
         })
@@ -204,6 +221,7 @@ class VisionFlowMatchingPolicy(nn.Module):
                 feat_dim=vision_feat_dim,
                 num_heads=attn_heads,
                 num_cameras=len(cameras),
+                query_dim=proprio_feat_dim,
             )
             self.fused_dim = vision_feat_dim + total_vision_dim + proprio_feat_dim
         else:
@@ -236,6 +254,7 @@ class VisionFlowMatchingPolicy(nn.Module):
             nn.SiLU(),
             nn.Linear(hidden_dim, hidden_dim),
         )
+        self.obs_dropout = nn.Dropout(dropout)
 
         # Vector field fusion layer
         fusion_dim = hidden_dim + hidden_dim + time_dim
@@ -396,7 +415,7 @@ class VisionFlowMatchingPolicy(nn.Module):
             x_flat = x_t
 
         obs_feat = self.extract_obs_features(obs)
-        obs_proj = self.obs_proj(obs_feat)
+        obs_proj = self.obs_dropout(self.obs_proj(obs_feat))
         act_proj = self.act_proj(x_flat)
         t_emb = self.time_encoder(t)
 

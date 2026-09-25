@@ -66,6 +66,8 @@ class VisionPolicyEvaluator:
             proprio_feat_dim=config["proprio_feat_dim"],
             hidden_dim=config["hidden_dim"],
             num_blocks=config["num_blocks"],
+            dropout=config.get("dropout", 0.0),
+            keypoint_noise=config.get("keypoint_noise", 0.0),
             cameras=self.cameras,
             use_cross_attention=config.get("use_cross_attention", False),
             attn_heads=config.get("attn_heads", 4),

@@ -300,5 +300,46 @@ def test_auxiliary_3d_pose_supervision() -> None:
     assert sampled.shape == (b, 8, 8)
 
 
+def test_bottleneck_and_keypoint_noise() -> None:
+    """Test compressed 3-camera bottleneck (num_keypoints=16, vision_feat_dim=32, fused_dim=192) and keypoint jitter."""
+    cameras = ("third_person_cam", "overhead_cam", "wrist_cam")
+    policy = VisionFlowMatchingPolicy(
+        act_dim=8,
+        horizon=16,
+        proprio_dim=9,
+        num_keypoints=16,
+        vision_feat_dim=32,
+        proprio_feat_dim=64,
+        hidden_dim=256,
+        num_blocks=4,
+        dropout=0.1,
+        keypoint_noise=0.05,
+        cameras=cameras,
+        use_cross_attention=True,
+        attn_heads=4,
+    )
 
+    # context (32) + all_vis (3 * 32 = 96) + proprio (64) = 192 (matches Run 7 bottleneck width)
+    assert policy.fused_dim == 192
+    assert policy.cross_attn is not None
+    assert policy.cross_attn.query_proj is not None
 
+    b = 2
+    batch_obs = {
+        f"rgb_{cam}": torch.randint(0, 256, (b, 128, 128, 3), dtype=torch.uint8)
+        for cam in cameras
+    }
+    batch_obs["proprio"] = torch.randn(b, 9)
+
+    # In train mode with keypoint_noise > 0, two forward passes on identical images yield jittered features
+    policy.train()
+    feat1 = policy.extract_obs_features(batch_obs)
+    feat2 = policy.extract_obs_features(batch_obs)
+    assert feat1.shape == (b, 192)
+    assert not torch.allclose(feat1, feat2)
+
+    # In eval mode, keypoint jitter and dropout are disabled (deterministic output)
+    policy.eval()
+    eval1 = policy.extract_obs_features(batch_obs)
+    eval2 = policy.extract_obs_features(batch_obs)
+    assert torch.allclose(eval1, eval2)

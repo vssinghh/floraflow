@@ -36,6 +36,8 @@ def train_vision_policy(
     num_blocks: int = 4,
     gripper_weight: float = 2.5,
     shift_aug: int = 4,
+    dropout: float = 0.0,
+    keypoint_noise: float = 0.0,
     use_cross_attention: bool = False,
     camera_dropout: float = 0.0,
     dropout_cameras: Tuple[str, ...] = ("wrist_cam",),
@@ -101,6 +103,8 @@ def train_vision_policy(
         proprio_feat_dim=proprio_feat_dim,
         hidden_dim=hidden_dim,
         num_blocks=num_blocks,
+        dropout=dropout,
+        keypoint_noise=keypoint_noise,
         cameras=cameras,
         use_cross_attention=use_cross_attention,
         camera_dropout=camera_dropout,
@@ -109,7 +113,9 @@ def train_vision_policy(
     ).to(device)
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
-    print(f"Vision policy initialized with {total_params:,} trainable parameters.")
+    print(f"Vision policy initialized with {total_params:,} trainable parameters (fused_dim={model.fused_dim}).")
+    if dropout > 0.0 or keypoint_noise > 0.0:
+        print(f"Regularization active: dropout={dropout:.2f}, keypoint_noise={keypoint_noise:.4f}.")
     if camera_dropout > 0.0:
         print(f"Modality masking active: Camera dropout p={camera_dropout:.2f} on {dropout_cameras}.")
     if use_aux_pose:
@@ -207,6 +213,8 @@ def train_vision_policy(
                         "proprio_feat_dim": proprio_feat_dim,
                         "hidden_dim": hidden_dim,
                         "num_blocks": num_blocks,
+                        "dropout": dropout,
+                        "keypoint_noise": keypoint_noise,
                         "gripper_weight": gripper_weight,
                         "cameras": list(cameras),
                         "use_cross_attention": use_cross_attention,
@@ -232,7 +240,11 @@ def main() -> None:
     parser.add_argument("--batch-size", type=int, default=128, help="Minibatch size")
     parser.add_argument("--lr", type=float, default=5e-4, help="Learning rate")
     parser.add_argument("--horizon", type=int, default=16, help="Action chunk prediction horizon")
+    parser.add_argument("--num-keypoints", type=int, default=32, help="Number of 2D Spatial Softmax keypoints per camera")
+    parser.add_argument("--vision-feat-dim", type=int, default=64, help="Visual feature projection dimension per camera")
     parser.add_argument("--hidden-dim", type=int, default=256, help="Hidden dimension of ResMLP backbone")
+    parser.add_argument("--dropout", type=float, default=0.0, help="Dropout probability in obs_proj and ResMLP blocks")
+    parser.add_argument("--keypoint-noise", type=float, default=0.0, help="Gaussian noise std injected into 2D keypoints during training")
     parser.add_argument("--gripper-weight", type=float, default=2.5, help="Gripper loss dimension weight")
     parser.add_argument("--shift-aug", type=int, default=4, help="Maximum random shift pixels for visual data augmentation")
     parser.add_argument("--use-cross-attention", action="store_true", help="Enable Multi-Camera Multi-Head Cross-Attention fusion")
@@ -251,7 +263,11 @@ def main() -> None:
         batch_size=args.batch_size,
         lr=args.lr,
         horizon=args.horizon,
+        num_keypoints=args.num_keypoints,
+        vision_feat_dim=args.vision_feat_dim,
         hidden_dim=args.hidden_dim,
+        dropout=args.dropout,
+        keypoint_noise=args.keypoint_noise,
         gripper_weight=args.gripper_weight,
         shift_aug=args.shift_aug,
         use_cross_attention=args.use_cross_attention,
