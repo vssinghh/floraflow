@@ -255,4 +255,50 @@ def test_camera_dropout_and_modality_masking() -> None:
     assert torch.all(weights_eval[:, :, 2] > 0.0)
 
 
+def test_auxiliary_3d_pose_supervision() -> None:
+    """Test 1-layer 3D Ruler Quiz auxiliary pose supervision during training and pixel-only inference."""
+    cameras = ("third_person_cam", "overhead_cam", "wrist_cam")
+    policy = VisionFlowMatchingPolicy(
+        act_dim=8,
+        horizon=8,
+        proprio_dim=9,
+        num_keypoints=16,
+        vision_feat_dim=32,
+        proprio_feat_dim=32,
+        hidden_dim=128,
+        num_blocks=2,
+        cameras=cameras,
+        use_cross_attention=True,
+        attn_heads=4,
+        use_aux_pose=True,
+        aux_pose_dim=9,
+    )
+
+    # context (32) + all_vis (96) + pred_pose (9) + proprio (32) = 169
+    assert policy.fused_dim == 169
+
+    b = 4
+    batch_obs = {
+        f"rgb_{cam}": torch.randint(0, 256, (b, 128, 128, 3), dtype=torch.uint8)
+        for cam in cameras
+    }
+    batch_obs["proprio"] = torch.randn(b, 9)
+    target_pose = torch.randn(b, 9)
+
+    policy.train()
+    cfm = ConditionalFlowMatcher()
+    x1 = torch.randn(b, 8, 8)
+    cfm_loss, _ = cfm.compute_loss(policy, x1, batch_obs)
+    pose_loss = policy.compute_aux_pose_loss(target_pose)
+    total_loss = cfm_loss + 0.5 * pose_loss
+    total_loss.backward()
+    assert pose_loss.item() > 0.0
+
+    # Verify inference works strictly from raw images + proprio without aux_pose
+    policy.eval()
+    sampled = cfm.sample(policy, batch_obs, horizon=8, act_dim=8, num_steps=2)
+    assert sampled.shape == (b, 8, 8)
+
+
+
 

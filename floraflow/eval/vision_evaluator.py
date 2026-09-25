@@ -71,6 +71,7 @@ class VisionPolicyEvaluator:
             attn_heads=config.get("attn_heads", 4),
             camera_dropout=config.get("camera_dropout", 0.0),
             dropout_cameras=tuple(config.get("dropout_cameras", ["wrist_cam"])),
+            use_aux_pose=config.get("use_aux_pose", False),
         ).to(self.device)
         self.model.load_state_dict(ckpt["model_state_dict"])
         self.model.eval()

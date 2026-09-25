@@ -39,6 +39,8 @@ def train_vision_policy(
     use_cross_attention: bool = False,
     camera_dropout: float = 0.0,
     dropout_cameras: Tuple[str, ...] = ("wrist_cam",),
+    use_aux_pose: bool = False,
+    aux_pose_weight: float = 0.5,
     device_str: str = "auto",
     cameras: Optional[Tuple[str, ...]] = None,
 ) -> None:
@@ -103,16 +105,21 @@ def train_vision_policy(
         use_cross_attention=use_cross_attention,
         camera_dropout=camera_dropout,
         dropout_cameras=dropout_cameras,
+        use_aux_pose=use_aux_pose,
     ).to(device)
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Vision policy initialized with {total_params:,} trainable parameters.")
     if camera_dropout > 0.0:
         print(f"Modality masking active: Camera dropout p={camera_dropout:.2f} on {dropout_cameras}.")
+    if use_aux_pose:
+        print(f"3D Ruler Quiz active: Auxiliary 3D Pose Supervision (weight={aux_pose_weight:.2f}).")
 
     shifter = RandomShifter(max_shift=shift_aug) if shift_aug > 0 else None
     if shifter is not None:
         print(f"Visual data augmentation: RandomShifter(max_shift={shift_aug}) active.")
+    else:
+        print("Visual data augmentation: RandomShifter disabled (shift_aug=0, exact multi-view geometry).")
 
     cfm = ConditionalFlowMatcher(sigma_min=1e-4, gripper_weight=gripper_weight)
 
@@ -128,6 +135,7 @@ def train_vision_policy(
     for epoch in range(1, epochs + 1):
         model.train()
         epoch_loss = 0.0
+        epoch_pose_loss = 0.0
         epoch_v_norm = 0.0
         epoch_u_norm = 0.0
         batches = 0
@@ -142,7 +150,13 @@ def train_vision_policy(
             dev_actions = batch_actions.to(device)
 
             optimizer.zero_grad()
-            loss, metrics = cfm.compute_loss(model, dev_actions, dev_obs)
+            cfm_loss, metrics = cfm.compute_loss(model, dev_actions, dev_obs)
+            if use_aux_pose and "aux_pose" in dev_obs:
+                pose_loss = model.compute_aux_pose_loss(dev_obs["aux_pose"])
+                loss = cfm_loss + aux_pose_weight * pose_loss
+                epoch_pose_loss += float(pose_loss.detach().item())
+            else:
+                loss = cfm_loss
             loss.backward()
 
             # Gradient clipping for stable training
@@ -157,15 +171,17 @@ def train_vision_policy(
         scheduler.step()
 
         mean_loss = epoch_loss / batches
+        mean_pose_loss = epoch_pose_loss / batches
         mean_v_norm = epoch_v_norm / batches
         mean_u_norm = epoch_u_norm / batches
         current_lr = scheduler.get_last_lr()[0]
 
         if epoch % 5 == 0 or epoch == 1 or epoch == epochs:
             elapsed = time.time() - t_start
+            pose_str = f" | PoseMSE: {mean_pose_loss:.5f}" if use_aux_pose else ""
             print(
                 f"Epoch [{epoch:3d}/{epochs:3d}] | "
-                f"Loss: {mean_loss:.5f} | "
+                f"Loss: {mean_loss:.5f}{pose_str} | "
                 f"|v|: {mean_v_norm:.3f} | "
                 f"|u|: {mean_u_norm:.3f} | "
                 f"LR: {current_lr:.2e} | "
@@ -196,6 +212,8 @@ def train_vision_policy(
                         "use_cross_attention": use_cross_attention,
                         "camera_dropout": camera_dropout,
                         "dropout_cameras": list(dropout_cameras),
+                        "use_aux_pose": use_aux_pose,
+                        "aux_pose_weight": aux_pose_weight,
                     },
                     "stats": dataset.stats,
                 },
@@ -220,6 +238,8 @@ def main() -> None:
     parser.add_argument("--use-cross-attention", action="store_true", help="Enable Multi-Camera Multi-Head Cross-Attention fusion")
     parser.add_argument("--camera-dropout", type=float, default=0.0, help="Camera dropout probability during training")
     parser.add_argument("--dropout-cameras", nargs="+", default=["wrist_cam"], help="Cameras eligible for dropout")
+    parser.add_argument("--use-aux-pose", action="store_true", help="Enable 1-Layer 3D Ruler Quiz auxiliary pose supervision")
+    parser.add_argument("--aux-pose-weight", type=float, default=0.5, help="Weight for 3D Ruler Quiz auxiliary loss")
     parser.add_argument("--cameras", nargs="+", default=None, help="Names of cameras to train with (defaults to auto-detect from dataset)")
     parser.add_argument("--device", type=str, default="auto", help="Compute device: auto, cpu, cuda, or mps")
     args = parser.parse_args()
@@ -237,6 +257,8 @@ def main() -> None:
         use_cross_attention=args.use_cross_attention,
         camera_dropout=args.camera_dropout,
         dropout_cameras=tuple(args.dropout_cameras),
+        use_aux_pose=args.use_aux_pose,
+        aux_pose_weight=args.aux_pose_weight,
         device_str=args.device,
         cameras=tuple(args.cameras) if args.cameras is not None else None,
     )

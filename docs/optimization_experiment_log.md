@@ -437,7 +437,77 @@ Applying camera dropout uniformly across all timesteps cures transport occlusion
 ### Decision
 - **RUN 9 REMAINS IN-DISTRIBUTION CHAMPION (100.0% ID, 7.7 cm alignment).**
 - **RUN 7 REMAINS OUT-OF-DISTRIBUTION CHAMPION (80.0% Hard OOD).**
-- **Next Architectural Evolution**: To unlock simultaneous 100% ID and >85% Hard OOD, dropout/gating must be phase-conditioned (active only after the gripper has closed on the handle).
+- **Next Architectural Evolution**: Force the camera encoders and cross-attention context to learn true 3D object coordinates via training-time auxiliary 3D pose supervision with uncorrupted multi-view geometry (`--shift-aug 0`).
+
+---
+
+## 15. Run 11: Auxiliary 3D Pose Supervision (The 3D Ruler Quiz) + Exact Multi-View Geometry (`--shift-aug 0`)
+
+### Problem from Last Champions (Run 7, Run 9, Run 10)
+Across Runs 7 through 10, Hard Out-of-Distribution (OOD) performance plateaued between 72.0% and 80.0%, compared to 96.0% for our Phase 1 Oracle State champion (Run 4).
+
+Diagnosing the 14 Hard OOD failures in Run 9 and Run 10 identified two underlying bottlenecks:
+1. **Unmetric Visual Shortcuts**: When training the 80K-parameter Spatial Softmax CNNs purely from action velocity errors through an 850K-parameter ResMLP backbone, the ResMLP memorizes background pixel correlations instead of forcing the CNNs to extract true linear 3D coordinates of the can handle (`grip_pos`), spout tip (`spout_pos`), and plant pot (`plant_pos`).
+2. **Multi-View Epipolar Blur from `--shift-aug 4`**: Shifting three cameras independently by $\pm 4$ pixels ($\pm 2.5\text{ cm}$ on the desk) without shifting the ground-truth action injects $2.5\text{ cm}$ of grasp calibration noise, which exceeds the $1.5\text{ cm}$ handle width at extreme table boundaries.
+
+### Approach Taken
+To make the multi-camera vision system behave like a self-contained 3D coordinate sensor without using any simulator coordinates at test time or any hardcoded task-phase rules:
+1. **1-Layer 3D Ruler Quiz (`--use-aux-pose`)**: We attach linear projection heads (`aux_vis_head` on the 192D multi-camera features and `aux_context_head` on the 64D cross-attention context in [`VisionFlowMatchingPolicy`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/policy/vision_model.py#L207)) supervised during training to predict the normalized 9D object coordinates (`[grip_pos, spout_pos, plant_pos]`) loaded by [`VisionWateringDataset`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/data/vision_dataset.py#L81).
+2. **Automatic Occlusion Routing**: Because `wrist_cam` cannot see `plant_pos` when blocked by the lifted watering can, supervising `context` with the 3D Ruler Quiz automatically forces [`MultiCameraCrossAttention`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/policy/vision_model.py#L88) to shift attention weights onto `overhead_cam` and `third_person_cam` during transport without any hardcoded phase rules.
+3. **Zero Geometric Shift (`--shift-aug 0`)**: We disable random pixel shifting so that the 3 camera views and the 3D coordinate targets remain in 100% geometric agreement. Because a 1-layer linear head on top of [`SpatialSoftmax`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/policy/spatial_softmax.py#L14) $(u, v)$ coordinates forms a continuous flat plane across the pixel grid, it interpolates and extrapolates across gaps without overfitting to static pixels.
+4. **Zero-Cheat Pixel-Only Evaluation**: At test time in [`VisionPolicyEvaluator`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/eval/vision_evaluator.py#L84), no simulator coordinates are ever accessed. The visual heads predict the 9D coordinates purely from raw RGB pixels.
+
+### Training Progression
+- Dataset: [`data/watering_demos_vision_3cam_300.h5`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/data/watering_demos_vision_3cam_300.h5) (300 episodes, 52,200 transitions)
+- Parameters: 1,178,613 (~1.18M)
+- Hyperparameters: `--shift-aug 0 --epochs 40 --batch-size 256 --use-cross-attention --use-aux-pose --aux-pose-weight 0.5`
+- Checkpoint: [`checkpoints/run11_aux_pose_3cam/best_vision_policy.pt`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/checkpoints/run11_aux_pose_3cam/best_vision_policy.pt)
+- Training Duration: 40 epochs (3,888.8 seconds, ~64.8 minutes)
+- Best Action Velocity Loss: **0.04413 MSE** (new all-time project record low, -6.5% vs Run 9)
+- Final 3D Ruler Quiz Error (`PoseMSE`): **0.00333** (~3.4 mm training coordinate error)
+- Vector Field Velocity: $|v| = 3.795$ converged to target $|u| = 3.853$
+
+### Benchmark Evaluation Results
+```text
+IN-DISTRIBUTION (Held-out seeds 100-119, 20 episodes):
+- Success Rate:            95.0% (19 / 20)   [-5.0% vs Run 9 & Run 10]
+- Mean Spout Alignment:    9.9 cm
+- Max Tilt Angle:          98.8 deg
+- Particles in Pot:        0.15
+- Inference Latency:       5.41 ms           [Real-time PASS (<50ms budget)]
+
+HARD OUT-OF-DISTRIBUTION (5-10 cm aggressive shifts, 50 episodes):
+- Success Rate:            62.0% (31 / 50)   [-10.0% vs Run 9 & Run 10]
+- Mean Spout Alignment:    20.1 cm
+- Max Tilt Angle:          68.3 deg
+- Particles in Pot:        0.48
+- Inference Latency:       5.48 ms           [Real-time PASS (<50ms budget)]
+```
+
+### Key Empirical Insights (The Inverse Training-Loss / OOD-Generalization Law)
+Run 11 revealed the most important generalization law of the vision pipeline. Compare the last five 300-demo runs sorted by training loss:
+
+| Run | Configuration | Training Loss | ID Success | Hard OOD Success |
+| :--- | :--- | :--- | :--- | :--- |
+| **Run 7** | Dual-Cam + `--shift-aug 4` | 0.05633 MSE | 90.0% (18/20) | **80.0% (40/50)** |
+| **Run 8** | Tri-Cam Concat + `--shift-aug 4` | 0.05273 MSE | 90.0% (18/20) | 76.0% (38/50) |
+| **Run 10** | Tri-Cam Attention + Dropout + `--shift-aug 4` | 0.05048 MSE | **100.0% (20/20)** | 72.0% (36/50) |
+| **Run 9** | Tri-Cam Attention + `--shift-aug 4` | 0.04720 MSE | **100.0% (20/20)** | 72.0% (36/50) |
+| **Run 11** | Tri-Cam Attention + Aux Pose + `--shift-aug 0` | **0.04413 MSE** | 95.0% (19/20) | **62.0% (31/50)** |
+
+1. **Why Removing `--shift-aug` Caused Severe OOD Overfitting**:
+   - In [`SpatialSoftmaxConvNet`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/policy/vision_model.py#L22-L85), before the 2D keypoints reach the linear Ruler Quiz head, they pass through 4 non-linear convolutional layers (`GroupNorm + SiLU`) and a non-linear projection (`Linear -> LayerNorm -> SiLU`).
+   - With `--shift-aug 0`, the convolutional filters saw the exact same 300 static plant pot pixel positions nearly 7,000 times across 40 epochs. Instead of learning translation-equivariant object detectors, the non-linear CNN filters memorized the 300 training pixel locations to reach `0.00333 PoseMSE` and `0.04413 CFM Loss`.
+   - When tested on Hard OOD positions outside those 300 memorized points, `pred_pose` produced large out-of-distribution errors, which directly misled the downstream action controller (`obs_proj`) and dropped Hard OOD from 72.0% down to 62.0%.
+2. **`RandomShifter` (`--shift-aug 4`) Is Mandatory for Scratch CNNs**:
+   - Run 11 confirms that when training a CNN from scratch on 300 episodes without a pretrained visual backbone, random spatial shift augmentation (`--shift-aug 4`) is essential to prevent the convolutional layers from memorizing static pixel coordinates.
+
+### Decision
+- **DO NOT PROMOTE RUN 11.**
+- **RUN 9 REMAINS IN-DISTRIBUTION CHAMPION (100.0% ID, 7.7 cm alignment).**
+- **RUN 7 REMAINS OUT-OF-DISTRIBUTION CHAMPION (80.0% Hard OOD).**
+
+
 
 
 

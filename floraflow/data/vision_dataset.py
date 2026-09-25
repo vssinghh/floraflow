@@ -44,8 +44,10 @@ class VisionWateringDataset(Dataset):
 
         self.episodes_images: Dict[str, List[np.ndarray]] = {cam: [] for cam in cameras}
         self.episodes_proprio: List[np.ndarray] = []
+        self.episodes_pose: List[np.ndarray] = []
         self.episodes_act: List[np.ndarray] = []
         self.indices: List[Tuple[int, int]] = []
+        self.has_aux_pose: bool = False
 
         if not self.h5_path.exists():
             raise FileNotFoundError(f"HDF5 dataset not found at: {self.h5_path}")
@@ -79,6 +81,15 @@ class VisionWateringDataset(Dataset):
                 self.episodes_proprio.append(proprio)
                 self.episodes_act.append(actions)
 
+                # Optional privileged 3D object pose (grip_pos, spout_pos, plant_pos) for training-only Ruler Quiz
+                if "grip_pos" in obs_grp and "spout_pos" in obs_grp and "plant_pos" in obs_grp:
+                    grip_pos = np.array(obs_grp["grip_pos"], dtype=np.float32)
+                    spout_pos = np.array(obs_grp["spout_pos"], dtype=np.float32)
+                    plant_pos = np.array(obs_grp["plant_pos"], dtype=np.float32)
+                    pose = np.concatenate([grip_pos, spout_pos, plant_pos], axis=-1)
+                    self.episodes_pose.append(pose)
+                    self.has_aux_pose = True
+
                 # Load camera frames
                 for cam in self.cameras:
                     cam_key = f"rgb_{cam}"
@@ -100,12 +111,22 @@ class VisionWateringDataset(Dataset):
         act_std = np.std(all_act, axis=0).astype(np.float32)
         act_std = np.clip(act_std, a_min=1e-3, a_max=None)
 
-        return {
+        stats_dict: Dict[str, np.ndarray] = {
             "proprio_mean": proprio_mean,
             "proprio_std": proprio_std,
             "act_mean": act_mean,
             "act_std": act_std,
         }
+
+        if self.has_aux_pose and len(self.episodes_pose) > 0:
+            all_pose = np.concatenate(self.episodes_pose, axis=0)
+            pose_mean = np.mean(all_pose, axis=0).astype(np.float32)
+            pose_std = np.std(all_pose, axis=0).astype(np.float32)
+            pose_std = np.clip(pose_std, a_min=1e-2, a_max=None)
+            stats_dict["pose_mean"] = pose_mean
+            stats_dict["pose_std"] = pose_std
+
+        return stats_dict
 
     def normalize_proprio(self, proprio: np.ndarray) -> np.ndarray:
         return (proprio - self.stats["proprio_mean"]) / self.stats["proprio_std"]
@@ -145,10 +166,16 @@ class VisionWateringDataset(Dataset):
             img_tensor = torch.from_numpy(raw_img).permute(2, 0, 1).float() / 255.0
             obs_dict[f"rgb_{cam}"] = img_tensor
 
-        # 2. Proprioception: 8D vector normalized with dataset mean and std
+        # 2. Proprioception: 9D vector normalized with dataset mean and std
         raw_proprio = self.episodes_proprio[ep_idx][t]
         norm_proprio = self.normalize_proprio(raw_proprio)
         obs_dict["proprio"] = torch.from_numpy(norm_proprio).float()
+
+        # 2b. Optional auxiliary 3D pose target (used strictly during training)
+        if self.has_aux_pose and "pose_mean" in self.stats:
+            raw_pose = self.episodes_pose[ep_idx][t]
+            norm_pose = (raw_pose - self.stats["pose_mean"]) / self.stats["pose_std"]
+            obs_dict["aux_pose"] = torch.from_numpy(norm_pose).float()
 
         # 3. Action chunk: slice [t : t + H], padded with final action if needed
         ep_act = self.episodes_act[ep_idx]

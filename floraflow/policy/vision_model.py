@@ -163,6 +163,8 @@ class VisionFlowMatchingPolicy(nn.Module):
         attn_heads: int = 4,
         camera_dropout: float = 0.0,
         dropout_cameras: Tuple[str, ...] = ("wrist_cam",),
+        use_aux_pose: bool = False,
+        aux_pose_dim: int = 9,
     ) -> None:
         super().__init__()
         self.act_dim = act_dim
@@ -173,6 +175,9 @@ class VisionFlowMatchingPolicy(nn.Module):
         self.attn_heads = attn_heads
         self.camera_dropout = camera_dropout
         self.dropout_cameras = tuple(dropout_cameras)
+        self.use_aux_pose = use_aux_pose
+        self.aux_pose_dim = aux_pose_dim
+        self._last_aux_preds: Tuple[torch.Tensor, ...] = ()
 
         # Visual encoders for each camera viewpoint
         self.encoders = nn.ModuleDict({
@@ -204,6 +209,17 @@ class VisionFlowMatchingPolicy(nn.Module):
         else:
             self.cross_attn = None
             self.fused_dim = total_vision_dim + proprio_feat_dim
+
+        # 1-Layer 3D Ruler Quiz heads (predicts 3D grip_pos, spout_pos, plant_pos from visual features)
+        if self.use_aux_pose:
+            self.aux_vis_head: Optional[nn.Linear] = nn.Linear(total_vision_dim, aux_pose_dim)
+            self.aux_context_head: Optional[nn.Linear] = (
+                nn.Linear(vision_feat_dim, aux_pose_dim) if self.use_cross_attention else None
+            )
+            self.fused_dim += aux_pose_dim
+        else:
+            self.aux_vis_head = None
+            self.aux_context_head = None
 
         # Time encoder
         self.time_encoder = nn.Sequential(
@@ -292,9 +308,35 @@ class VisionFlowMatchingPolicy(nn.Module):
             cam_tokens = torch.stack(vis_features, dim=1)
             proprio_query = proprio_feat.unsqueeze(1)
             context, _ = self.cross_attn(cam_tokens, proprio_query, key_padding_mask=padding_mask)
+            if self.use_aux_pose and self.aux_vis_head is not None:
+                pred_vis = self.aux_vis_head(all_vis)
+                pred_ctx = self.aux_context_head(context) if self.aux_context_head is not None else pred_vis
+                pred_pose = 0.5 * (pred_vis + pred_ctx)
+                self._last_aux_preds = (pred_vis, pred_ctx)
+                return torch.cat([context, all_vis, pred_pose, proprio_feat], dim=-1)
             return torch.cat([context, all_vis, proprio_feat], dim=-1)
 
+        if self.use_aux_pose and self.aux_vis_head is not None:
+            pred_vis = self.aux_vis_head(all_vis)
+            self._last_aux_preds = (pred_vis,)
+            return torch.cat([all_vis, pred_vis, proprio_feat], dim=-1)
+
         return torch.cat([all_vis, proprio_feat], dim=-1)
+
+    def compute_aux_pose_loss(self, target_pose: torch.Tensor) -> torch.Tensor:
+        """Compute 3D Ruler Quiz MSE loss against normalized ground-truth object coordinates.
+
+        Args:
+            target_pose: Normalized 9D object coordinates (grip_pos, spout_pos, plant_pos) of shape (B, 9).
+
+        Returns:
+            pose_loss: Scalar MSE loss across visual coordinate prediction heads.
+        """
+        if not self.use_aux_pose or not self._last_aux_preds:
+            return torch.tensor(0.0, device=target_pose.device, dtype=torch.float32)
+
+        losses = [torch.mean((pred - target_pose) ** 2) for pred in self._last_aux_preds]
+        return sum(losses) / len(losses)
 
     def get_attention_weights(
         self,
