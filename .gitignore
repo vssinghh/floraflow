@@ -43,6 +43,8 @@ checkpoints/**/*.pth
 *.mp4
 *.png
 !assets/*.png
+!assets/media/*.png
+!assets/media/*.gif
 
 # IDE and OS files
 .DS_Store
