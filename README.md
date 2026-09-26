@@ -1,43 +1,33 @@
-# FloraFlow: Minimalist Flow Matching Action Chunker for Tabletop Manipulation
+# FloraFlow: Multi-Camera Flow Matching for 6-DoF Tabletop Manipulation
 
-`FloraFlow` is an end-to-end, cleanroom robotics system demonstrating 6-DoF object grasping, spatial transport, and fluid pouring using Optimal Transport Conditional Flow Matching (CFM) action chunking.
+FloraFlow is a PyTorch and MuJoCo codebase for 6-DoF robot manipulation (grasping, transport, and fluid pouring) on a 7-DoF Franka Emika Panda arm using **Optimal Transport Conditional Flow Matching (OT-CFM)** action chunking.
 
-Built for the Franka Emika Panda robot arm in MuJoCo physics with zero external diffusion framework dependencies.
+It includes both a **State-Based Policy** (operating on ground-truth 3D object coordinates) and a **Pixel-to-Action Vision Policy** (`VisionFlowMatchingPolicy`) that maps synchronized tri-camera RGB streams (`third_person_cam`, `overhead_cam`, and eye-in-hand `wrist_cam`) and joint proprioception directly to continuous 16-step action chunks at 20 Hz.
 
 <p align="center">
   <img src="assets/media/vla_telemetry_showcase.gif" width="96%" alt="FloraFlow 4-Layer Multi-Camera VLA Telemetry Rollout"/>
 </p>
 
----
+## 1. System Architecture & Formulation
 
-## 1. First-Principles Architecture
+### Why Optimal Transport Flow Matching?
+Standard behavioral cloning with a single-step MSE loss struggles on dexterous tasks because averaging multimodal demonstrations guides the gripper between valid trajectories. Denoising Diffusion Probabilistic Models (DDPMs) represent multimodal action distributions accurately, but integrating curved stochastic paths typically requires 50 to 100 neural function evaluations (100 to 500 ms), which is too slow for a 20 Hz (`50 ms` budget) real-time control loop.
 
-### What is it?
-Conditional Flow Matching is a generative modeling framework that learns a continuous velocity vector field pushing a simple Gaussian noise distribution $p_0(x) = \mathcal{N}(0, I)$ directly onto an empirical trajectory distribution $p_1(x)$ along straight-line paths.
+Optimal Transport Conditional Flow Matching (OT-CFM) regressing straight-line probability paths between Gaussian source noise $x_0 \sim \mathcal{N}(0, I)$ and expert action chunks $x_1 \in \mathbb{R}^{H \times D_{\text{act}}}$ solves both problems:
+$$x_t = (1 - (1 - \sigma_{\min}) t) x_0 + t x_1, \quad u_t(x_1 \mid x_0) = x_1 - (1 - \sigma_{\min}) x_0$$
+Because the transport paths are straight with constant target velocity $u_t$, an explicit Euler ODE solver converges in **10 integration steps (`~5.4 ms` on Apple Silicon MPS)**, while sliding-window **Temporal Ensembling** ($w_h = \exp(-0.05 h)$) blends overlapping 16-step predictions into smooth 20 Hz actuator commands. This same action-chunking formulation underpins modern manipulation stacks such as Physical Intelligence ($\pi_0$), TRI Diffusion Policy, and ALOHA 2.
 
-Instead of predicting single delta actions step by step, the policy predicts an entire future action chunk $X = [a_t, a_{t+1}, \dots, a_{t+H-1}] \in \mathbb{R}^{H \times D_{act}}$ ($H=16$, $D_{act}=8$) conditioned on current physical observations.
+### System Specifications
 
-### Why do we use it?
-Traditional behavioral cloning with Mean Squared Error suffers from the multimodality collapse problem: if an expert can reach around an obstacle from either the left or the right, MSE averages both trajectories, guiding the robot straight into the collision.
+| Component | Specification |
+| :--- | :--- |
+| **Simulation & Physics** | MuJoCo 3.x, 7-DoF Franka Emika Panda arm + parallel-jaw gripper, `500 Hz` physics (`dt = 2 ms`, 25 substeps), `20 Hz` policy control |
+| **Visual Observation (`Phase 2`)** | 3 synchronized $128 \times 128$ RGB cameras: `third_person_cam`, `overhead_cam`, and wrist-mounted `wrist_cam` |
+| **Proprioception (`9D`)** | 7D arm joint angles (`qpos`) + 1D gripper finger width + 1D normalized episode phase progress |
+| **Vision Backbone** | Per-camera 4-layer ConvNet + [`SpatialSoftmax`](floraflow/policy/spatial_softmax.py) (`16` 2D keypoints, `32`-dim projection) + 4-head [`MultiCameraCrossAttention`](floraflow/policy/vision_model.py) (`192`-dim fused bottleneck) |
+| **Action Chunk (`16 x 8`)** | 16-step horizon ($0.8\text{ s}$): 7 target joint positions (`rad`) + 1 gripper command (`+1` open, `-1` close) |
+| **Datasets** | **Vision**: 300 collision-validated demos ($52,200$ transitions) · **State**: 500 widened demos ($87,000$ transitions) |
 
-Standard Denoising Diffusion Probabilistic Models (DDPM) solve multimodality but require 50 to 100 iterative denoising steps along curved Brownian trajectories, imposing 100 to 500 ms of latency that violates real-time control constraints.
-
-Optimal Transport Conditional Flow Matching defines straight-line probability paths:
-$$x_t = (1 - (1 - \sigma_{min}) t) x_0 + t x_1$$
-The target vector field velocity is constant along each sample path:
-$$u_t(x_1 | x_0) = x_1 - (1 - \sigma_{min}) x_0$$
-Because the paths are straight, numerical ODE integration converges in only 5 to 10 Euler steps, achieving sub-10 ms inference latencies well within the 50 ms deadline for 20 Hz control loops.
-
-### How do we use it?
-1. **Simulation & Synthesis**: Franka Panda arm manipulates a watering can on a table, transports it to a potted plant, and tilts the spout at 50 degrees to deposit water particles into the soil pot.
-2. **Dataset Generation**: 100 deterministic expert trajectories ($17,400$ total transitions) collected via Damped Least Squares Inverse Kinematics and minimum-jerk interpolation, stored in structured HDF5.
-3. **Flow Matching Training**: Lightweight residual MLP policy ($<1\text{M}$ parameters) trained on rolling 16-step action chunks using optimal transport vector field regression.
-4. **Closed-Loop Evaluation**: Policy evaluated in MuJoCo across in-distribution and out-of-distribution initial configurations, logging success rates, kinematic clearances, and inference latencies.
-
-### Which teams and real-world systems use it?
-Flow matching and action chunking form the core execution heads of Google DeepMind (RoboCat, ALOHA 2), Meta FAIR, Physical Intelligence ($\pi_0$), and TRI (Diffusion Policy).
-
----
 
 ## 2. Directory Structure
 
@@ -82,8 +72,6 @@ floraflow/
 └── pyproject.toml              # Dependencies and build configuration
 ```
 
----
-
 ## 3. Quick Start
 
 ### Installation
@@ -115,8 +103,6 @@ uv pip install -e .
    uv run scripts/03_evaluate_policy.py --mode both --difficulty hard --num-episodes 50
    ```
 
----
-
 ### Phase 2: Pixel-to-Action Vision Policy (Raw Camera Pixels)
 
 1. **Collect Multi-Camera Demonstrations**:
@@ -143,15 +129,11 @@ uv pip install -e .
    uv run scripts/04_visualize_vision_rollout.py --checkpoint checkpoints/run12_bottleneck_3cam/best_vision_policy.pt --mode id --seed 102 --output assets/media/vla_telemetry_showcase.gif
    ```
 
----
-
 ### Run Test Suite
 Run automated unit tests covering environment contracts, spawn clearance validation, IK convergence, flow matching calculus, vision backbones, and telemetry projection:
 ```bash
 uv run pytest tests/
 ```
-
----
 
 ## 4. Benchmark Results & Scorecards
 
@@ -188,6 +170,8 @@ Closed-loop evaluation benchmarks conducted across held-out in-distribution tria
 
 #### Vision Optimization Progression
 
+Full ablation details, failure-mode forensics, and step-by-step experimental derivations across all 14 runs are documented in [`docs/optimization_experiment_log.md`](docs/optimization_experiment_log.md).
+
 | Iteration | Configuration | In-Distribution (20 Seeds) | Hard Out-of-Distribution (50 Seeds) | Spout Error (ID / OOD) | Mean Latency |
 | :--- | :--- | :--- | :--- | :--- | :--- |
 | **Run 5 (Baseline)** | 100 Demos, No Augmentation (`fused_dim=192`) | 75.0% (15 / 20) | 30.0% (6 / 20 on Hard) | 16.3 cm / 31.5 cm | 4.65 ms |
@@ -216,12 +200,4 @@ The [`VisionRolloutVisualizer`](floraflow/eval/visualizer.py) composites four in
    * **Millimeter Grasp (Step 39)**: `wrist_cam` spikes (`41.3%` on ID Seed 102, `51.8%` on Hard OOD Seed 204) as the fingers close around the `8 mm` handle.
    * **Pouring (Steps 116 to 196)**: When the tilted watering can occludes `wrist_cam`, attention shifts back to `third_person_cam` and `overhead_cam` (`85%` to `97%` combined) to hold the spout at `5.3 to 8.0 cm` over the pot rim.
 4. **Physical Telemetry Strip**: Real-time scrolling plots of Spout-to-Pot distance ($\text{cm}$), Can Tilt angle ($\text{deg}$), Gripper state (`OPEN` / `GRASPED`), and Water Particles in Pot (`5 / 8`).
-
-### Technical Highlights
-1. **Zero External Framework Dependencies**: The entire Flow Matching calculus (optimal transport probability paths, analytical velocity vector fields, and explicit Euler numerical ODE integration) is implemented directly in pure PyTorch.
-2. **Tri-Camera Cross-Attention & Compressed Keypoint Bottleneck**: 4-layer CNN encoders with Spatial Softmax (`16` keypoints, `32`-dim projection per view) and 4-head [`MultiCameraCrossAttention`](floraflow/policy/vision_model.py) compress `third_person_cam`, `overhead_cam`, and `wrist_cam` into a compact `192`-dim bottleneck that prevents background pixel memorization.
-3. **Two-Stage Spawn Clearance & Contact Validation**: [`DeskWateringEnv`](floraflow/env/desk_env.py) enforces geometric object/finger clearance (`is_valid_spawn`) and Step 0 MuJoCo contact verification (`has_initial_collision`), ensuring 100% collision-free training datasets and evaluation benchmarks.
-4. **Temporal Ensembling**: Replaces open-loop execution with continuous sliding window exponential blending ($w_i = \exp(-0.05 \cdot i)$) at every control step, eliminating velocity seams and providing continuous trajectory adjustments.
-5. **Sub-6ms Inference Latency**: Full tri-camera pixel-to-action inference executes in **5.2 to 5.9 ms**, consuming roughly 11% of the 50 ms budget for 20 Hz control loops.
-6. **Detailed Documentation & Walkthroughs**: Full technical derivations and step-by-step experiment logs are maintained in [`docs/optimization_experiment_log.md`](docs/optimization_experiment_log.md).
 
