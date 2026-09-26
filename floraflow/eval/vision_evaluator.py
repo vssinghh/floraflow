@@ -131,6 +131,7 @@ class VisionPolicyEvaluator:
         ensemble_decay: float = 0.05,
     ) -> EpisodeResult:
         """Execute one complete closed-loop evaluation episode using raw vision."""
+        torch.manual_seed(seed)
         obs = self.env.reset(seed=seed, can_xy=can_xy, plant_xy=plant_xy)
         actual_can_xy = (float(obs["can_pos"][0]), float(obs["can_pos"][1]))
         actual_plant_xy = (float(obs["plant_pos"][0]), float(obs["plant_pos"][1]))

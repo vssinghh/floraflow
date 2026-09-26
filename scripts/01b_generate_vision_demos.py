@@ -44,11 +44,11 @@ def generate_vision_demonstrations(
     if widened_bounds:
         can_range = {
             "x": (0.42, 0.62),
-            "y": (0.05, 0.28),
+            "y": (0.120, 0.28),
         }
         plant_range = {
             "x": (0.32, 0.52),
-            "y": (-0.32, -0.12),
+            "y": (-0.32, -0.170),
         }
         print("Using WIDENED workspace bounds for visual demonstration collection.")
 
@@ -82,6 +82,14 @@ def generate_vision_demonstrations(
             obs = env.reset(seed=seed)
             init_can_pos = obs["can_pos"].copy()
             init_plant_pos = obs["plant_pos"].copy()
+
+            if env.has_initial_collision() or not env.is_valid_spawn(
+                (float(init_can_pos[0]), float(init_can_pos[1])),
+                (float(init_plant_pos[0]), float(init_plant_pos[1])),
+            ):
+                print(f"Warning: Seed {seed} had initial spawn collision or insufficient clearance. Skipping seed.")
+                seed += 1
+                continue
 
             obs_history, action_history, success = planner.plan_and_execute()
 

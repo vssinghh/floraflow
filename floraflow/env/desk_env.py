@@ -27,6 +27,10 @@ class DeskWateringEnv:
         "y": (-0.26, -0.18),
     }
 
+    MIN_OBJECT_DISTANCE = 0.22
+    MIN_CAN_Y_CLEARANCE = 0.120
+    MAX_PLANT_Y_CLEARANCE = -0.170
+
     def __init__(
         self,
         xml_path: Optional[str] = None,
@@ -73,6 +77,11 @@ class DeskWateringEnv:
         self._plant_body_id = self.model.body("potted_plant").id
         self._can_jnt_id = self.model.joint("watering_can_joint").id
         self._can_qpos_adr = self.model.jnt_qposadr[self._can_jnt_id]
+        self._robot_body_ids = {
+            bid
+            for bid in range(self.model.nbody)
+            if (self.model.body(bid).name or "").startswith(("link", "hand", "left_finger", "right_finger"))
+        }
 
         self._grip_site_id = self.model.site("can_grip_site").id
         self._spout_site_id = self.model.site("can_spout_tip").id
@@ -90,48 +99,69 @@ class DeskWateringEnv:
         self.renderer: Optional[mujoco.Renderer] = None
         self.current_step = 0
 
+    @classmethod
+    def is_valid_spawn(
+        cls,
+        can_xy: Tuple[float, float],
+        plant_xy: Tuple[float, float],
+    ) -> bool:
+        """Validate that a (can_xy, plant_xy) spawn pair has safe physical clearance.
+
+        Ensures:
+        1. Minimum center-to-center distance between watering can and plant pot (>= 22 cm)
+           so their 3D geometry (spout, handle, rim, foliage) never touch or overlap.
+        2. Safe Y clearance from the robot's initial home hand and fingers at y = 0.00 m
+           (right finger at y = +0.04 m, left finger at y = -0.04 m) so neither object
+           spawns inside or hooking the open gripper fingers.
+        """
+        cx, cy = float(can_xy[0]), float(can_xy[1])
+        px, py = float(plant_xy[0]), float(plant_xy[1])
+
+        dist_xy = float(np.hypot(cx - px, cy - py))
+        if dist_xy < cls.MIN_OBJECT_DISTANCE:
+            return False
+
+        if cy < cls.MIN_CAN_Y_CLEARANCE:
+            return False
+
+        if py > cls.MAX_PLANT_Y_CLEARANCE:
+            return False
+
+        return True
+
+    def has_initial_collision(self) -> bool:
+        """Check whether the settled reset state has any illegal contacts or finger deflection.
+
+        At Step 0 after settling, the robot arm and fingers must have zero contacts
+        with any scene object, the watering can and plant pot must not touch each other,
+        and the open gripper width must remain unperturbed (~0.08 m).
+        """
+        f1 = float(self.data.qpos[self._finger_qpos_adr[0]])
+        f2 = float(self.data.qpos[self._finger_qpos_adr[1]])
+        if abs((f1 + f2) - 0.08) > 1e-3:
+            return True
+
+        for i in range(self.data.ncon):
+            con = self.data.contact[i]
+            b1 = int(self.model.geom_bodyid[con.geom1])
+            b2 = int(self.model.geom_bodyid[con.geom2])
+            if b1 in self._robot_body_ids or b2 in self._robot_body_ids:
+                return True
+            if (b1 == self._can_body_id and b2 == self._plant_body_id) or (
+                b1 == self._plant_body_id and b2 == self._can_body_id
+            ):
+                return True
+        return False
+
     def reset(
         self,
         seed: Optional[int] = None,
         can_xy: Optional[Tuple[float, float]] = None,
         plant_xy: Optional[Tuple[float, float]] = None,
     ) -> Dict[str, np.ndarray]:
-        """Reset environment with optional seed and randomized object positions."""
+        """Reset environment with optional seed and validated collision-free object positions."""
         rng = np.random.default_rng(seed)
-
-        # Reset simulation state
-        mujoco.mj_resetData(self.model, self.data)
-
-        # Robot default home pose: pre-positioned above desk
         default_qpos = np.array([0.0, -0.35, 0.0, -2.1, 0.0, 1.75, 0.785])
-        for adr, val in zip(self._arm_qpos_adr, default_qpos):
-            self.data.qpos[adr] = val
-
-        # Open gripper
-        for adr in self._finger_qpos_adr:
-            self.data.qpos[adr] = 0.04
-
-        # Randomize or assign watering can position
-        if can_xy is None:
-            can_x = rng.uniform(*self.can_pos_range["x"])
-            can_y = rng.uniform(*self.can_pos_range["y"])
-        else:
-            can_x, can_y = can_xy
-
-        # Can rests on table surface at Z = 0.405 m
-        self.data.qpos[self._can_qpos_adr : self._can_qpos_adr + 3] = [can_x, can_y, 0.405]
-        self.data.qpos[self._can_qpos_adr + 3 : self._can_qpos_adr + 7] = [1.0, 0.0, 0.0, 0.0]
-
-        # Randomize or assign plant position
-        if plant_xy is None:
-            plant_x = rng.uniform(*self.plant_pos_range["x"])
-            plant_y = rng.uniform(*self.plant_pos_range["y"])
-        else:
-            plant_x, plant_y = plant_xy
-
-        self.model.body_pos[self._plant_body_id] = [plant_x, plant_y, 0.40]
-
-        # Place water particles inside the watering can reservoir
         particle_offsets = [
             (-0.01, -0.01, 0.02),
             (0.01, -0.01, 0.02),
@@ -142,20 +172,62 @@ class DeskWateringEnv:
             (0.01, 0.0, 0.035),
             (0.0, -0.01, 0.035),
         ]
-        for adr, (dx, dy, dz) in zip(self._particle_qpos_adrs, particle_offsets):
-            self.data.qpos[adr : adr + 3] = [can_x + dx, can_y + dy, 0.405 + dz]
-            self.data.qpos[adr + 3 : adr + 7] = [1.0, 0.0, 0.0, 0.0]
 
-        # Zero out velocities and set position servo targets
-        self.data.qvel[:] = 0.0
-        for i, val in enumerate(default_qpos):
-            self.data.ctrl[i] = val
-        if self.model.nu > 7:
-            self.data.ctrl[7] = 255.0
+        max_attempts = 100 if (can_xy is None or plant_xy is None) else 1
+        for attempt in range(max_attempts):
+            # Randomize or assign watering can position
+            if can_xy is None:
+                can_x = float(rng.uniform(*self.can_pos_range["x"]))
+                can_y = float(rng.uniform(*self.can_pos_range["y"]))
+            else:
+                can_x, can_y = float(can_xy[0]), float(can_xy[1])
 
-        # Step forward 50 physics steps to settle contacts
-        for _ in range(50):
-            mujoco.mj_step(self.model, self.data)
+            # Randomize or assign plant position
+            if plant_xy is None:
+                plant_x = float(rng.uniform(*self.plant_pos_range["x"]))
+                plant_y = float(rng.uniform(*self.plant_pos_range["y"]))
+            else:
+                plant_x, plant_y = float(plant_xy[0]), float(plant_xy[1])
+
+            if (can_xy is None or plant_xy is None) and attempt < max_attempts - 1:
+                if not self.is_valid_spawn((can_x, can_y), (plant_x, plant_y)):
+                    continue
+
+            # Reset simulation state
+            mujoco.mj_resetData(self.model, self.data)
+
+            # Robot default home pose: pre-positioned above desk
+            for adr, val in zip(self._arm_qpos_adr, default_qpos):
+                self.data.qpos[adr] = val
+
+            # Open gripper
+            for adr in self._finger_qpos_adr:
+                self.data.qpos[adr] = 0.04
+
+            # Can rests on table surface at Z = 0.405 m
+            self.data.qpos[self._can_qpos_adr : self._can_qpos_adr + 3] = [can_x, can_y, 0.405]
+            self.data.qpos[self._can_qpos_adr + 3 : self._can_qpos_adr + 7] = [1.0, 0.0, 0.0, 0.0]
+
+            self.model.body_pos[self._plant_body_id] = [plant_x, plant_y, 0.40]
+
+            # Place water particles inside the watering can reservoir
+            for adr, (dx, dy, dz) in zip(self._particle_qpos_adrs, particle_offsets):
+                self.data.qpos[adr : adr + 3] = [can_x + dx, can_y + dy, 0.405 + dz]
+                self.data.qpos[adr + 3 : adr + 7] = [1.0, 0.0, 0.0, 0.0]
+
+            # Zero out velocities and set position servo targets
+            self.data.qvel[:] = 0.0
+            for i, val in enumerate(default_qpos):
+                self.data.ctrl[i] = val
+            if self.model.nu > 7:
+                self.data.ctrl[7] = 255.0
+
+            # Step forward 50 physics steps to settle contacts
+            for _ in range(50):
+                mujoco.mj_step(self.model, self.data)
+
+            if not self.has_initial_collision():
+                break
 
         self.current_step = 0
         return self.get_obs()

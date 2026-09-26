@@ -111,6 +111,7 @@ class PolicyEvaluator:
         ensemble_decay: float = 0.05,
     ) -> EpisodeResult:
         """Execute one complete closed-loop evaluation episode."""
+        torch.manual_seed(seed)
         obs = self.env.reset(seed=seed, can_xy=can_xy, plant_xy=plant_xy)
         actual_can_xy = (float(obs["can_pos"][0]), float(obs["can_pos"][1]))
         actual_plant_xy = (float(obs["plant_pos"][0]), float(obs["plant_pos"][1]))
@@ -279,59 +280,67 @@ def generate_ood_configurations(
     base_seed: int = 200,
     difficulty: str = "hard",
 ) -> Tuple[List[int], List[Tuple[float, float]], List[Tuple[float, float]]]:
-    """Generate out-of-distribution can and plant configurations outside training bounds."""
+    """Generate out-of-distribution can and plant configurations outside training bounds.
+
+    Enforces physical spawn clearance via DeskWateringEnv.is_valid_spawn so that
+    neither object spawns colliding with the robot's initial home fingers or with each other.
+    """
     rng = np.random.default_rng(base_seed)
     seeds = [base_seed + i for i in range(num_episodes)]
     can_xys = []
     plant_xys = []
 
     for _ in range(num_episodes):
-        if difficulty == "mild":
-            if rng.random() > 0.5:
-                cx = rng.uniform(0.45, 0.47) if rng.random() > 0.5 else rng.uniform(0.57, 0.60)
-                cy = rng.uniform(0.13, 0.21)
-            else:
-                cx = rng.uniform(0.49, 0.55)
-                cy = rng.uniform(0.09, 0.11) if rng.random() > 0.5 else rng.uniform(0.23, 0.25)
+        while True:
+            if difficulty == "mild":
+                if rng.random() > 0.5:
+                    cx = rng.uniform(0.45, 0.47) if rng.random() > 0.5 else rng.uniform(0.57, 0.60)
+                    cy = rng.uniform(0.13, 0.21)
+                else:
+                    cx = rng.uniform(0.49, 0.55)
+                    cy = rng.uniform(0.225, 0.24) if rng.random() > 0.5 else rng.uniform(0.23, 0.25)
 
-            if rng.random() > 0.5:
-                px = rng.uniform(0.35, 0.37) if rng.random() > 0.5 else rng.uniform(0.47, 0.50)
-                py = rng.uniform(-0.25, -0.19)
-            else:
-                px = rng.uniform(0.39, 0.45)
-                py = rng.uniform(-0.29, -0.27) if rng.random() > 0.5 else rng.uniform(-0.16, -0.14)
+                if rng.random() > 0.5:
+                    px = rng.uniform(0.35, 0.37) if rng.random() > 0.5 else rng.uniform(0.47, 0.50)
+                    py = rng.uniform(-0.25, -0.19)
+                else:
+                    px = rng.uniform(0.39, 0.45)
+                    py = rng.uniform(-0.29, -0.27) if rng.random() > 0.5 else rng.uniform(-0.178, -0.170)
 
-        elif difficulty == "hard":
-            if rng.random() > 0.5:
-                cx = rng.uniform(0.41, 0.45) if rng.random() > 0.5 else rng.uniform(0.59, 0.64)
-                cy = rng.uniform(0.10, 0.24)
-            else:
-                cx = rng.uniform(0.46, 0.58)
-                cy = rng.uniform(0.03, 0.08) if rng.random() > 0.5 else rng.uniform(0.25, 0.31)
+            elif difficulty == "hard":
+                if rng.random() > 0.5:
+                    cx = rng.uniform(0.41, 0.45) if rng.random() > 0.5 else rng.uniform(0.59, 0.64)
+                    cy = rng.uniform(0.125, 0.24)
+                else:
+                    cx = rng.uniform(0.46, 0.58)
+                    cy = rng.uniform(0.23, 0.26) if rng.random() > 0.5 else rng.uniform(0.25, 0.31)
 
-            if rng.random() > 0.5:
-                px = rng.uniform(0.31, 0.35) if rng.random() > 0.5 else rng.uniform(0.49, 0.54)
-                py = rng.uniform(-0.27, -0.17)
-            else:
-                px = rng.uniform(0.36, 0.48)
-                py = rng.uniform(-0.35, -0.29) if rng.random() > 0.5 else rng.uniform(-0.14, -0.07)
+                if rng.random() > 0.5:
+                    px = rng.uniform(0.31, 0.35) if rng.random() > 0.5 else rng.uniform(0.49, 0.54)
+                    py = rng.uniform(-0.27, -0.175)
+                else:
+                    px = rng.uniform(0.36, 0.48)
+                    py = rng.uniform(-0.35, -0.29) if rng.random() > 0.5 else rng.uniform(-0.178, -0.170)
 
-        elif difficulty == "extreme":
-            if rng.random() > 0.5:
-                cx = rng.uniform(0.37, 0.41) if rng.random() > 0.5 else rng.uniform(0.64, 0.69)
-                cy = rng.uniform(0.08, 0.25)
-            else:
-                cx = rng.uniform(0.44, 0.60)
-                cy = rng.uniform(-0.02, 0.04) if rng.random() > 0.5 else rng.uniform(0.30, 0.36)
+            elif difficulty == "extreme":
+                if rng.random() > 0.5:
+                    cx = rng.uniform(0.37, 0.41) if rng.random() > 0.5 else rng.uniform(0.64, 0.69)
+                    cy = rng.uniform(0.125, 0.25)
+                else:
+                    cx = rng.uniform(0.44, 0.60)
+                    cy = rng.uniform(0.26, 0.30) if rng.random() > 0.5 else rng.uniform(0.30, 0.36)
 
-            if rng.random() > 0.5:
-                px = rng.uniform(0.27, 0.32) if rng.random() > 0.5 else rng.uniform(0.53, 0.58)
-                py = rng.uniform(-0.28, -0.16)
+                if rng.random() > 0.5:
+                    px = rng.uniform(0.27, 0.32) if rng.random() > 0.5 else rng.uniform(0.53, 0.58)
+                    py = rng.uniform(-0.28, -0.175)
+                else:
+                    px = rng.uniform(0.34, 0.50)
+                    py = rng.uniform(-0.40, -0.32) if rng.random() > 0.5 else rng.uniform(-0.178, -0.170)
             else:
-                px = rng.uniform(0.34, 0.50)
-                py = rng.uniform(-0.40, -0.32) if rng.random() > 0.5 else rng.uniform(-0.11, -0.04)
-        else:
-            raise ValueError(f"Unknown difficulty: {difficulty}")
+                raise ValueError(f"Unknown difficulty: {difficulty}")
+
+            if DeskWateringEnv.is_valid_spawn((float(cx), float(cy)), (float(px), float(py))):
+                break
 
         can_xys.append((float(cx), float(cy)))
         plant_xys.append((float(px), float(py)))

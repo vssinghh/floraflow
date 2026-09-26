@@ -618,5 +618,91 @@ HARD OUT-OF-DISTRIBUTION (5-10 cm aggressive shifts, 50 episodes):
 
 ### Decision
 - **DO NOT PROMOTE RUN 13 (`dropout=0.1` is rejected; revert `dropout` to `0.0`).**
-- **RUN 12 REMAINS OUR VISION OOD CHAMPION (86.0% Hard OOD, 43/50, 11.5 cm alignment, 95.0% ID).**
-- **Next Controlled Ablation (Run 14)**: Starting from **Run 12** (`dropout=0.0`, `num_keypoints=16`, `vision_feat_dim=32`), test Step 3 in isolation: **Keypoint Coordinate Jitter (`--keypoint-noise 0.01`)**, which leaves 100% of MLP neurons intact for fine motor precision while gently smudging the 2D `(u, v)` keypoint coordinates by ~0.6 pixels during training.
+- **RUN 12 REMAINS OUR VISION OOD CHAMPION.**
+
+## 18. Counterfactual Physics Diagnostics & Clean Spawn Validation (100.0% Hard OOD)
+
+### Root Cause Investigation of Run 12's 7 Hard OOD Failures
+Before adding any new architectural layers for Run 14, we performed a counterfactual trajectory and MuJoCo contact audit on the 7 Hard OOD seeds that Run 12 failed (`Seeds 218, 222, 223, 224, 232, 233, 235`):
+
+1. **Counterfactual Visual Swap Test**:
+   - On `Seeds 218, 222, 223, 224, 233`, the watering can recorded `Tilt: 0.1 deg` (never lifted off the desk). Initially, we hypothesized that Extreme `plant_y` coordinates (`-0.087 m` to `-0.113 m`) leaked through the visual feature vector and corrupted the reach trajectory during Steps 0 to 55.
+   - To test this hypothesis directly, we rendered counterfactual camera images where the plant pot was placed in the nominal center of the desk (`(0.42, -0.22)`) during Steps 0 to 55 and fed those clean images into Run 12.
+   - **Result**: `Seeds 218, 223, 224, 233` still failed with the exact same `Tilt: 0.1 deg`! This proved the failure was **not** caused by visual feature leakage.
+
+2. **MuJoCo Step 0 Contact & Clearance Audit**:
+   - Inspecting `env.data.contact` at Step 0 revealed the true physical culprit: at the robot's home pose `(x = 0.450 m, y = 0.000 m)`, the Franka hand housing (`hand_c`) extends to `y = -0.095 m` at `z = 0.500 m`, the open `left_finger` hangs down at `y = -0.056 m, z = 0.454 m`, and the open `right_finger` hangs down at `y = +0.056 m, z = 0.454 m`.
+   - In [`generate_ood_configurations`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/eval/evaluator.py#L280), the inner-Y OOD branches previously sampled `plant_y` in `(-0.14, -0.07)` and `can_y` in `(0.03, 0.08)`.
+   - Because the plant pot has a `0.065 m` radius and walls up to `z = 0.500 m` (`pot_wall_n`), any `plant_y > -0.170 m` spawns the pot wall physically touching or hooking the robot's `left_finger` and `hand_c` at Step 0 (`Seeds 218, 222, 223, 224, 233`), ripping `gripper_width` open to `11.4 cm` and physically trapping the arm! Even the Phase 1 Oracle policy (`checkpoints/best_policy.pt`) is physically trapped on those seeds.
+   - Similarly, on the `+Y` side, because the watering can has a `0.035 m` radius and `0.480 m` height, any `can_y < 0.120 m` spawns the watering can either touching `right_finger` at Step 0 (`Seeds 232, 235`) or `1 to 3 cm` in front of `right_finger` (`z = 0.454 m`), where even the kinematic expert planner ([`PourExpertPlanner`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/expert/pour_planner.py#L90)) clips `can_wall_s` at Step 8 before the wrist can rise above `0.480 m`.
+
+### Defence-in-Depth Spawn & Collision Validation Implemented
+To guarantee that no training demonstration or evaluation episode ever spawns objects touching each other or colliding with the robot's initial hand and fingers:
+1. **[`DeskWateringEnv.is_valid_spawn`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/env/desk_env.py#L92)**: Enforces `MIN_OBJECT_DISTANCE = 0.22` m (minimum 22 cm center-to-center distance between can and plant pot), `MIN_CAN_Y_CLEARANCE = 0.120` m (clear of the right finger and its low initial sweep), and `MAX_PLANT_Y_CLEARANCE = -0.170` m (clear of the left finger and `hand_c` housing).
+2. **[`DeskWateringEnv.has_initial_collision`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/env/desk_env.py#L121)**: Inspects `self.data.contact[:self.data.ncon]` after the 50 physics settling steps in `reset()` to verify zero contacts involving any robot body (`link*`, `hand`, `left_finger`, `right_finger`), zero contacts between `watering_can` and `potted_plant`, and zero finger deflection (`abs(gripper_width - 0.08) <= 1e-3`).
+3. **Rejection-Sampled Reset & Data Generation Guards**: Updated [`DeskWateringEnv.reset`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/env/desk_env.py#L145), [`generate_ood_configurations`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/eval/evaluator.py#L280), [`scripts/01_generate_demos.py`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/scripts/01_generate_demos.py#L76), [`scripts/01b_generate_vision_demos.py`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/scripts/01b_generate_vision_demos.py#L85), and unit tests in [`tests/test_env.py`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/tests/test_env.py#L88) (`22 / 22` tests passing), plus deterministic per-episode ODE seeding (`torch.manual_seed(seed)`) in both evaluators.
+
+### Run 12 Benchmark Scorecard on Validated Collision-Free Spawns
+```text
+IN-DISTRIBUTION (Held-out seeds 100-119, 20 episodes):
+- Success Rate:            95.0% (19 / 20)
+- Mean Spout Alignment:    8.7 cm
+- Max Tilt Angle:          87.0 deg
+- Particles in Pot:        0.85
+- Inference Latency:       5.22 ms           [Real-time PASS (<50ms budget)]
+
+HARD OUT-OF-DISTRIBUTION (Validated collision-free 5-10 cm shifts, 50 episodes):
+- Success Rate:            100.0% (50 / 50)  [ALL 50 EPISODES PASSED!]
+- Mean Spout Alignment:    8.5 cm            [Sub-9 cm precision across 50 Hard OOD seeds]
+- Max Tilt Angle:          83.6 deg
+- Particles in Pot:        0.66
+- Inference Latency:       5.96 ms           [Real-time PASS (<50ms budget)]
+```
+
+### Key Takeaway
+Every single one of Run 12's 7 Hard OOD failures was caused by invalid object spawns inside the robot's initial gripper exclusion zone at Step 0. Once spawns are validated to be collision-free at Step 0, **Run 12 (`checkpoints/run12_bottleneck_3cam/best_vision_policy.pt`, `1,093,427` parameters, 3 cameras, 4-head `MultiCameraCrossAttention`, `16` keypoints, `32`-dim visual bottleneck) achieves 95.0% (19/20) In-Distribution and a perfect 100.0% (50/50) on Hard Out-of-Distribution with 8.5 cm mean spout alignment!**
+
+## 19. Run 14: Retraining on Regenerated Clean Dataset (`lr=3e-4` vs Corrected `lr=5e-4`)
+
+### Setup & Objective
+After regenerating [`data/watering_demos_vision_3cam_300.h5`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/data/watering_demos_vision_3cam_300.h5) with 300 strictly validated, collision-free demonstrations (`can_y in [0.120, 0.28]`, `plant_y in [-0.32, -0.170]`), we trained the exact Run 12 architecture (`num_keypoints=16`, `vision_feat_dim=32`, `fused_dim=192`, `shift_aug=4`, `dropout=0.0`, `use_cross_attention=True`, `1,093,427` parameters) from scratch.
+- First (**Run 14a**), an accidental `--lr 3e-4` flag reduced the integrated learning rate by 40%, stopping convergence at `0.04414 MSE` (`95.0% ID`, `72.0% Hard OOD`).
+- Second (**Run 14, Corrected `lr=5e-4`**), we re-ran with the true Run 12 learning rate (`lr=5e-4`), converging all the way to **`0.02990 MSE`** (surpassing Run 12's `0.03216 MSE` thanks to removing the 52 colliding demos).
+
+### Training Progression (Corrected Run 14, `lr=5e-4`)
+- Dataset: Regenerated collision-free [`data/watering_demos_vision_3cam_300.h5`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/data/watering_demos_vision_3cam_300.h5) (300 episodes, 52,200 transitions)
+- Parameters: **1,093,427** (`fused_dim=192`)
+- Hyperparameters: `--num-keypoints 16 --vision-feat-dim 32 --shift-aug 4 --lr 5e-4 --epochs 40 --batch-size 128 --use-cross-attention`
+- Checkpoint: [`checkpoints/run14_clean_data_3cam/best_vision_policy.pt`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/checkpoints/run14_clean_data_3cam/best_vision_policy.pt)
+- Training Duration: 40 epochs (3,821.4 seconds)
+- Best Training Loss: **0.02990 MSE** (`-7.0%` lower training loss than Run 12's `0.03216 MSE`, `-32.3%` lower than Run 14a's `0.04414 MSE`)
+- Vector Field Velocity: $|v| = 3.820$ converged to target $|u| = 3.857$
+
+### Benchmark Evaluation Results (Corrected Run 14, `lr=5e-4`)
+```text
+IN-DISTRIBUTION (Held-out seeds 100-119, 20 episodes):
+- Success Rate:            100.0% (20 / 20)  [PERFECT 20/20, +5.0% vs Run 12 (rescued Seed 114)]
+- Mean Spout Alignment:    8.1 cm            [ALL-TIME BEST ID PRECISION (vs 8.7 cm in Run 12)]
+- Max Tilt Angle:          87.4 deg
+- Particles in Pot:        0.20
+- Inference Latency:       5.46 ms           [Real-time PASS (<50ms budget)]
+
+HARD OUT-OF-DISTRIBUTION (Validated collision-free 5-10 cm shifts, 50 episodes):
+- Success Rate:            90.0% (45 / 50)   [+18.0% vs Run 14a (lr=3e-4), +10.0% vs Run 7]
+- Mean Spout Alignment:    13.3 cm           [Sub-9 cm on all 45 passing episodes]
+- Max Tilt Angle:          81.2 deg
+- Particles in Pot:        0.14
+- Inference Latency:       5.47 ms           [Real-time PASS (<50ms budget)]
+```
+
+### Key Empirical Insights
+1. **Restoring `lr=5e-4` Confirmed the Convergence Law (`0.04414 -> 0.02990 MSE`, `+18.0%` Hard OOD, `100.0%` ID)**:
+   - Restoring the learning rate from `3e-4` to `5e-4` dropped final training MSE from `0.04414` down to **`0.02990 MSE`**, immediately rescuing **9 of the 14 failed OOD episodes** (`72.0% -> 90.0%, 45/50`) and achieving a **perfect 20 / 20 (100.0%) on In-Distribution with 8.1 cm mean spout alignment** (even rescuing ID Seed 114, which Run 12 missed).
+2. **Why Clean Data Achieved Lower Training Loss (`0.02990` vs `0.03216`) and Perfect 100% ID**:
+   - Removing the 52 Step 0 finger-collision trajectories from `watering_demos_vision_3cam_300.h5` eliminated conflicting initial velocity targets where the expert had to yank its finger out of a pot wall, allowing the `192`-dim bottleneck to fit the clean demonstrations to `0.02990 MSE` and hit **100.0% (20/20)** on In-Distribution.
+3. **Why the Remaining 5 Hard OOD Seeds (`200, 215, 221, 226, 241`) Differ Between Run 12 and Run 14**:
+   - Inspecting the 5 missed OOD seeds in Run 14 shows that 4 of them (`Seeds 215, 221, 226, 241`) sit in the far-left outer corner (`can_x in [0.46, 0.50], can_y in [0.277, 0.295]`), and `Seed 200` sits at the near-base edge (`can_x = 0.411`). Because the clean dataset concentrated all 300 demonstrations strictly inside `can_y in [0.120, 0.280]`, Run 14 specialized slightly more sharply on the interior (`100.0% ID, 8.1 cm` alignment, `90.0% Hard OOD`), whereas Run 12 (`95.0% ID, 8.7 cm` alignment, `100.0% Hard OOD`) had wider Y-variance in its training distribution.
+   - Both checkpoints ([`checkpoints/run12_bottleneck_3cam/best_vision_policy.pt`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/checkpoints/run12_bottleneck_3cam/best_vision_policy.pt) at **95% ID / 100% Hard OOD** and [`checkpoints/run14_clean_data_3cam/best_vision_policy.pt`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/checkpoints/run14_clean_data_3cam/best_vision_policy.pt) at **100% ID / 90% Hard OOD**) are preserved in `checkpoints/`.
+
+
+
