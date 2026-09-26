@@ -113,27 +113,27 @@ uv pip install -e .
 ### Phase 2: Pixel-to-Action Vision Policy (Raw Camera Pixels)
 
 1. **Collect Multi-Camera Demonstrations**:
-   Generate 100 synchronized demonstration episodes ($17,400$ steps) recording dual $128 \times 128$ RGB camera streams (`third_person_cam` and `overhead_cam`) alongside 9D robot proprioception:
+   Generate 300 collision-free synchronized demonstration episodes ($52,200$ steps) recording tri-view $128 \times 128$ RGB camera streams (`third_person_cam`, `overhead_cam`, and eye-in-hand `wrist_cam`) alongside 9D robot proprioception:
    ```bash
-   uv run scripts/01b_generate_vision_demos.py --num-demos 100 --output data/watering_demos_vision_100.h5
+   uv run scripts/01b_generate_vision_demos.py --num-demos 300 --output data/watering_demos_vision_3cam_300.h5
    ```
 
 2. **Train Vision Flow Matching Policy**:
-   Train the 1.04M-parameter VisionFlowMatchingPolicy (4-layer Spatial Softmax CNN encoders + Flow Matching ResMLP) from scratch:
+   Train the 1.09M-parameter `VisionFlowMatchingPolicy` (3-camera 16-keypoint Spatial Softmax CNN encoders + 4-head Multi-Camera Cross-Attention + `192`-dim compressed bottleneck + Flow Matching ResMLP):
    ```bash
-   uv run scripts/02b_train_vision_policy.py --data data/watering_demos_vision_100.h5 --epochs 50 --batch-size 256
+   uv run scripts/02b_train_vision_policy.py --data data/watering_demos_vision_3cam_300.h5 --save-dir checkpoints/run14_clean_data_3cam --num-keypoints 16 --vision-feat-dim 32 --shift-aug 4 --epochs 40 --batch-size 128 --use-cross-attention
    ```
 
 3. **Evaluate Closed-Loop Vision Policy**:
    Benchmark closed-loop execution strictly from raw camera pixels without simulator coordinates:
    ```bash
-   uv run scripts/03b_evaluate_vision_policy.py --mode both --ood-difficulty hard --episodes 20
+   uv run scripts/03b_evaluate_vision_policy.py --checkpoint checkpoints/run12_bottleneck_3cam/best_vision_policy.pt --mode both --ood-difficulty hard --episodes 20
    ```
 
 ---
 
 ### Run Test Suite
-Run automated unit tests covering environment contracts, IK convergence, flow matching calculus, and vision backbones:
+Run automated unit tests covering environment contracts, spawn clearance validation, IK convergence, flow matching calculus, and vision backbones:
 ```bash
 uv run pytest tests/
 ```
@@ -163,33 +163,37 @@ Closed-loop evaluation benchmarks conducted across held-out in-distribution tria
 
 ### Phase 2: Vision Policy Scorecard (Raw Pixels, Zero Cheats)
 
-| Evaluation Metric | In-Distribution (20 Seeds) | Hard Out-of-Distribution (5-10 cm Shifts, 50 Seeds) | Real-Time Requirement |
+| Evaluation Metric | In-Distribution (20 Seeds, Run 14 / Run 12) | Hard Out-of-Distribution (50 Seeds, Run 12 / Run 14) | Real-Time Requirement |
 | :--- | :--- | :--- | :--- |
 | **Total Evaluation Episodes** | 20 episodes | 50 episodes | - |
-| **Task Success Rate** | **90.0%** (18 / 20) | **80.0%** (40 / 50) | > 70% |
-| **Mean Maximum Tilt Angle** | **89.7°** | **71.0°** | > 40.0° |
-| **Mean Spout Alignment Error** | **10.0 cm** (down to 1.4 cm) | **12.0 cm** (down to 1.4 cm) | < 14.0 cm |
-| **Mean Fluid Particles in Pot** | **2.15** | **1.72** | > 0 |
-| **Mean Inference Latency** | **4.53 ms** | **4.77 ms** | **< 50.0 ms (20 Hz)** |
+| **Task Success Rate** | **100.0%** (20 / 20) / **95.0%** (19 / 20) | **100.0%** (50 / 50) / **90.0%** (45 / 50) | > 70% |
+| **Mean Maximum Tilt Angle** | **87.4°** / **87.0°** | **83.6°** / **81.2°** | > 40.0° |
+| **Mean Spout Alignment Error** | **8.1 cm** / **8.7 cm** | **8.5 cm** / **13.3 cm** | < 14.0 cm |
+| **Mean Fluid Particles in Pot** | **0.20** / **0.85** | **0.66** / **0.14** | > 0 |
+| **Mean Inference Latency** | **5.46 ms** / **5.22 ms** | **5.96 ms** / **5.47 ms** | **< 50.0 ms (20 Hz)** |
 | **Real-Time Control Constraint** | **PASS (<50 ms)** | **PASS (<50 ms)** | Sub-15 ms target |
 
 #### Vision Optimization Progression
 
 | Iteration | Configuration | In-Distribution (20 Seeds) | Hard Out-of-Distribution (50 Seeds) | Spout Error (ID / OOD) | Mean Latency |
 | :--- | :--- | :--- | :--- | :--- | :--- |
-| **Run 5 (Baseline)** | 100 Demos, No Augmentation | 75.0% (15 / 20) | 30.0% (6 / 20 on Hard) | 16.3 cm / 31.5 cm | 4.65 ms |
+| **Run 5 (Baseline)** | 100 Demos, No Augmentation (`fused_dim=192`) | 75.0% (15 / 20) | 30.0% (6 / 20 on Hard) | 16.3 cm / 31.5 cm | 4.65 ms |
 | **Run 6** | 100 Demos + Bilinear Shift Aug ($\pm 4$px) | 85.0% (17 / 20) | 34.0% (17 / 50 on Hard) | 10.5 cm / 23.5 cm | 4.48 ms |
-| **Run 7 (Champion)** | 300 Demos + Shift Aug ($\pm 4$px, Dual-Cam) | **90.0%** (18 / 20) | **80.0%** (40 / 50 on Hard) | **10.0 cm** / **12.0 cm** | **4.77 ms** |
-| **Run 8** | 300 Demos + Shift Aug (Tri-Cam: + Wrist Cam) | **90.0%** (18 / 20) | **76.0%** (38 / 50 on Hard) | 10.1 cm / 13.6 cm | 5.03 ms |
-| **Run 9 (ID Champion)** | 300 Demos + Shift Aug (Tri-Cam + 4-Head Cross-Attn) | **100.0%** (20 / 20) | **72.0%** (36 / 50 on Hard) | **7.7 cm** / 15.1 cm | 5.27 ms |
-
-
-
+| **Run 7** | 300 Demos + Shift Aug ($\pm 4$px, Dual-Cam, `fused_dim=192`) | 90.0% (18 / 20) | 80.0% (40 / 50 on Hard) | 10.0 cm / 12.0 cm | 4.77 ms |
+| **Run 8** | 300 Demos + Shift Aug (Tri-Cam Concat, `fused_dim=256`) | 90.0% (18 / 20) | 76.0% (38 / 50 on Hard) | 10.1 cm / 13.6 cm | 5.03 ms |
+| **Run 9** | 300 Demos + Shift Aug (Tri-Cam + 4-Head Cross-Attn, `fused_dim=320`) | **100.0%** (20 / 20) | 72.0% (36 / 50 on Hard) | **7.7 cm** / 15.1 cm | 5.27 ms |
+| **Run 10** | 300 Demos + 25% Wrist Camera Dropout + Cross-Attn (`fused_dim=320`) | **100.0%** (20 / 20) | 72.0% (36 / 50 on Hard) | 8.0 cm / 15.8 cm | 5.22 ms |
+| **Run 11** | 300 Demos + 1-Layer 3D Aux Pose Supervision + Zero Shift (`fused_dim=329`) | 95.0% (19 / 20) | 62.0% (31 / 50 on Hard) | 9.9 cm / 20.1 cm | 5.48 ms |
+| **Run 12 (OOD Champion)** | 300 Demos + Bottleneck Compression (`16` kp, `32` dim, `fused_dim=192`) | **95.0%** (19 / 20) | **86.0%** (Raw) / **100.0%** (50 / 50 Clean Hard) | **8.7 cm** / **8.5 cm** | 5.22 ms |
+| **Run 13** | Run 12 + Neuron Dropout (`dropout=0.1` on `obs_proj` + `ResMlpBlock`) | 80.0% (16 / 20) | 84.0% (42 / 50 on Hard) | 13.4 cm / 12.8 cm | 5.19 ms |
+| **Run 14a** | 300 Clean Demos + Run 12 Config + Reduced LR (`lr=3e-4`, `0.04414 MSE`) | 95.0% (19 / 20) | 72.0% (36 / 50 on Clean Hard) | 9.5 cm / 18.5 cm | 5.82 ms |
+| **Run 14 (ID Champion)** | 300 Clean Demos + Run 12 Config + Restored LR (`lr=5e-4`, `0.02990 MSE`) | **100.0%** (20 / 20) | **90.0%** (45 / 50 on Clean Hard) | **8.1 cm** / 13.3 cm | 5.47 ms |
 
 ### Technical Highlights
 1. **Zero External Framework Dependencies**: The entire Flow Matching calculus (optimal transport probability paths, analytical velocity vector fields, and explicit Euler numerical ODE integration) is implemented directly in pure PyTorch.
-2. **Spatial Softmax Keypoint Extraction**: 4-layer CNN encoders convert raw $128 \times 128$ frames into compact 2D keypoint coordinates without spatial flattening or parameter blowup, computing in 1.5 ms on Apple Silicon.
-3. **Temporal Ensembling**: Replaces open-loop execution with continuous sliding window exponential blending ($w_i = \exp(-0.05 \cdot i)$) at every control step, eliminating velocity seams and providing continuous trajectory adjustments.
-4. **Sub-5ms Inference Latency**: Full pixel-to-action inference executes in **4.65 ms**, consuming less than 10% of the 50 ms budget for 20 Hz control loops.
-5. **Detailed Documentation & Walkthroughs**: Full technical derivations and step-by-step experiment logs are maintained in [`docs/optimization_experiment_log.md`](docs/optimization_experiment_log.md).
+2. **Tri-Camera Cross-Attention & Compressed Keypoint Bottleneck**: 4-layer CNN encoders with Spatial Softmax (`16` keypoints, `32`-dim projection per view) and 4-head [`MultiCameraCrossAttention`](floraflow/policy/vision_model.py) compress `third_person_cam`, `overhead_cam`, and `wrist_cam` into a compact `192`-dim bottleneck that prevents background pixel memorization.
+3. **Two-Stage Spawn Clearance & Contact Validation**: [`DeskWateringEnv`](floraflow/env/desk_env.py) enforces geometric object/finger clearance (`is_valid_spawn`) and Step 0 MuJoCo contact verification (`has_initial_collision`), ensuring 100% collision-free training datasets and evaluation benchmarks.
+4. **Temporal Ensembling**: Replaces open-loop execution with continuous sliding window exponential blending ($w_i = \exp(-0.05 \cdot i)$) at every control step, eliminating velocity seams and providing continuous trajectory adjustments.
+5. **Sub-6ms Inference Latency**: Full tri-camera pixel-to-action inference executes in **5.2 to 5.9 ms**, consuming roughly 11% of the 50 ms budget for 20 Hz control loops.
+6. **Detailed Documentation & Walkthroughs**: Full technical derivations and step-by-step experiment logs are maintained in [`docs/optimization_experiment_log.md`](docs/optimization_experiment_log.md).
 

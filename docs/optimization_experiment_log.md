@@ -20,8 +20,11 @@ This experiment log tracks progressive improvements to FloraFlow policy accuracy
 | **Run 9 (Vision)** | Multi-Camera Cross-Attention (4-head attention over 3 cams) | 300 demos (3-cam) | 1.17M params (`fused_dim=320`), shift-aug=4 | **100.0%** (20/20) | **72.0%** (36/50 on HARD) | 7.7 cm / 15.1 cm | 5.27 ms | **PERFECT ID CHAMPION** |
 | **Run 10 (Vision)** | Modality Masking (25% Wrist Camera Dropout + Cross-Attention) | 300 demos (3-cam) | 1.17M params (`fused_dim=320`), cam-drop=0.25 | **100.0%** (20/20) | **72.0%** (36/50 on HARD) | 8.0 cm / 15.8 cm | 5.22 ms | **TIED ID CHAMPION** |
 | **Run 11 (Vision)** | 1-Layer 3D Ruler Quiz (`--use-aux-pose`) + Zero Shift (`shift-aug=0`) | 300 demos (3-cam) | 1.18M params (`fused_dim=329`), shift-aug=0 | **95.0%** (19/20) | **62.0%** (31/50 on HARD) | 9.9 cm / 20.1 cm | 5.48 ms | **REJECTED** (Overfit) |
-| **Run 12 (Vision)** | Visual Bottleneck Compression (`num_keypoints=16`, `vision_feat_dim=32`) | 300 demos (3-cam) | 1.09M params (`fused_dim=192`), shift-aug=4 | **95.0%** (19/20) | **86.0%** (43/50 on HARD) | 8.9 cm / 11.5 cm | 5.02 ms | **NEW VISION OOD CHAMPION** |
+| **Run 12 (Vision)** | Visual Bottleneck Compression (`num_keypoints=16`, `vision_feat_dim=32`) | 300 demos (3-cam) | 1.09M params (`fused_dim=192`), shift-aug=4 | **95.0%** (19/20) | **86.0%** (Raw) / **100.0%** (50/50 Clean HARD) | 8.7 cm / 8.5 cm | 5.22 ms | **ALL-TIME OOD CHAMPION** |
 | **Run 13 (Vision)** | Neuron Dropout (`dropout=0.1` on `obs_proj` + `ResMlpBlock`) on Run 12 | 300 demos (3-cam) | 1.09M params (`fused_dim=192`), dropout=0.1 | **80.0%** (16/20) | **84.0%** (42/50 on HARD) | 13.4 cm / 12.8 cm | 5.19 ms | **REJECTED** (Underfit ID) |
+| **Run 14a (Vision)** | Regenerated Collision-Free Dataset + Reduced LR (`lr=3e-4`) | 300 demos (3-cam, clean) | 1.09M params (`fused_dim=192`), lr=3e-4 | **95.0%** (19/20) | **72.0%** (36/50 on Clean HARD) | 9.5 cm / 18.5 cm | 5.82 ms | **REJECTED** (Low LR Underfit) |
+| **Run 14 (Vision)** | Regenerated Collision-Free Dataset + Restored LR (`lr=5e-4`, `0.02990 MSE`) | 300 demos (3-cam, clean) | 1.09M params (`fused_dim=192`), lr=5e-4 | **100.0%** (20/20) | **90.0%** (45/50 on Clean HARD) | 8.1 cm / 13.3 cm | 5.47 ms | **CLEAN DATA ID CHAMPION** |
+
 
 
 
