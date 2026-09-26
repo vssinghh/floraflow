@@ -68,6 +68,39 @@ class SpatialSoftmaxConvNet(nn.Module):
             nn.SiLU(),
         )
 
+    def extract_keypoints_with_confidence(
+        self,
+        x: torch.Tensor,
+        viz_temperature: float = 0.08,
+    ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Extract projected visual features along with contrast-sharpened 2D keypoints and confidences.
+
+        Args:
+            x: RGB image tensor of shape (B, 3, 128, 128) normalized to [0, 1].
+            viz_temperature: Sharp softmax temperature for diagnostic keypoint visualization
+                to remove post-GroupNorm uniform background dilution.
+
+        Returns:
+            features: Visual feature embedding of shape (B, feature_dim).
+            keypoints_2d: Spatial coordinates of shape (B, num_keypoints, 2) in [-1, 1].
+            confidence: Channel peak probabilities of shape (B, num_keypoints) in [0, 1].
+        """
+        h = self.act(self.norm1(self.conv1(x)))
+        h = self.act(self.norm2(self.conv2(h)))
+        h = self.act(self.norm3(self.conv3(h)))
+        h = self.act(self.norm4(self.conv4(h)))
+
+        keypoints = self.spatial_softmax(h)
+        viz_kp, confidence = self.spatial_softmax.forward_with_confidence(
+            h,
+            viz_temperature=viz_temperature,
+        )
+        keypoints_2d = viz_kp.reshape(x.shape[0], self.num_keypoints, 2)
+        if self.training and self.keypoint_noise > 0.0:
+            keypoints = keypoints + torch.randn_like(keypoints) * self.keypoint_noise
+        features = self.proj(keypoints)
+        return features, keypoints_2d, confidence
+
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         """Forward pass extracting spatial keypoint features.
 
@@ -390,6 +423,54 @@ class VisionFlowMatchingPolicy(nn.Module):
         proprio_query = proprio_feat.unsqueeze(1)
         _, attn_weights = self.cross_attn(cam_tokens, proprio_query, key_padding_mask=key_padding_mask)
         return attn_weights
+
+    @torch.no_grad()
+    def extract_visual_telemetry(
+        self,
+        obs: Dict[str, torch.Tensor],
+    ) -> Dict[str, Any]:
+        """Extract 2D keypoints, channel confidences, and cross-attention weights for visualization.
+
+        Args:
+            obs: Observation dictionary with camera images and proprioception (batch size 1).
+
+        Returns:
+            telemetry: Dictionary containing:
+                - keypoints: Dict[str, np.ndarray] of shape (num_keypoints, 2) in [-1, 1] per camera.
+                - confidences: Dict[str, np.ndarray] of shape (num_keypoints,) in [0, 1] per camera.
+                - attn_weights: np.ndarray of shape (num_cameras,) summing to 1.0.
+        """
+        vis_features = []
+        keypoints_dict = {}
+        confidences_dict = {}
+
+        for cam in self.cameras:
+            img = obs[f"rgb_{cam}"]
+            if img.ndim == 4 and img.shape[-1] == 3:
+                img = img.permute(0, 3, 1, 2)
+            if img.dtype == torch.uint8:
+                img = img.float() / 255.0
+            feat, kp_2d, conf = self.encoders[cam].extract_keypoints_with_confidence(img)
+            vis_features.append(feat)
+            keypoints_dict[cam] = kp_2d[0].detach().cpu().numpy()
+            confidences_dict[cam] = conf[0].detach().cpu().numpy()
+
+        if self.use_cross_attention and self.cross_attn is not None:
+            cam_tokens = torch.stack(vis_features, dim=1)
+            proprio = obs["proprio"]
+            proprio_feat = self.proprio_encoder(proprio)
+            proprio_query = proprio_feat.unsqueeze(1)
+            _, attn_w = self.cross_attn(cam_tokens, proprio_query)
+            attn_np = attn_w[0, 0].detach().cpu().numpy()
+        else:
+            n_cams = len(self.cameras)
+            attn_np = torch.full((n_cams,), 1.0 / max(n_cams, 1), dtype=torch.float32).numpy()
+
+        return {
+            "keypoints": keypoints_dict,
+            "confidences": confidences_dict,
+            "attn_weights": attn_np,
+        }
 
     def forward(
         self,

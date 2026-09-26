@@ -4,6 +4,10 @@
 
 Built for the Franka Emika Panda robot arm in MuJoCo physics with zero external diffusion framework dependencies.
 
+<p align="center">
+  <img src="assets/media/vla_telemetry_showcase.gif" width="96%" alt="FloraFlow 4-Layer Multi-Camera VLA Telemetry Rollout"/>
+</p>
+
 ---
 
 ## 1. First-Principles Architecture
@@ -41,6 +45,7 @@ Flow matching and action chunking form the core execution heads of Google DeepMi
 floraflow/
 ├── assets/
 │   ├── franka_emika_panda/     # Franka arm & gripper MuJoCo models
+│   ├── media/                  # 4-layer VLA telemetry rollout GIFs and keyframe strips
 │   └── scenes/
 │       └── desk_scene.xml      # Tabletop scene: arm, plant, watering can, water particles
 ├── checkpoints/                # Model weights, configs, and dataset normalization stats
@@ -56,22 +61,24 @@ floraflow/
 │   ├── policy/
 │   │   ├── model.py            # FlowMatchingPolicy network (state-based)
 │   │   ├── spatial_softmax.py  # Differentiable Spatial Softmax 2D keypoint extraction layer
-│   │   ├── vision_model.py     # VisionFlowMatchingPolicy (dual-camera CNN + proprioception fusion)
+│   │   ├── vision_model.py     # VisionFlowMatchingPolicy (multi-camera CNN + proprioception fusion)
 │   │   └── flow_matching.py    # Optimal Transport CFM vector field head & Euler integrator
 │   ├── data/
 │   │   ├── dataset.py          # State-based HDF5 dataset loader and normalizer
 │   │   └── vision_dataset.py   # Multi-camera HDF5 dataset loader with in-memory caching
 │   └── eval/
 │       ├── evaluator.py        # State policy closed-loop evaluator and scorecard utilities
-│       └── vision_evaluator.py # Pixel-to-Action closed-loop evaluator with temporal ensembling
+│       ├── vision_evaluator.py # Pixel-to-Action closed-loop evaluator with temporal ensembling
+│       └── visualizer.py       # 4-layer VLA telemetry compositor (keypoints, 3D FK ribbon, HUD)
 ├── scripts/
 │   ├── 01_generate_demos.py    # Generates state expert demonstrations
 │   ├── 01b_generate_vision_demos.py # Generates multi-camera visual demonstrations
 │   ├── 02_train_policy.py      # Trains state Flow Matching policy
 │   ├── 02b_train_vision_policy.py   # Trains Pixel-to-Action Flow Matching policy
 │   ├── 03_evaluate_policy.py   # Evaluates state policy on ID and OOD benchmarks
-│   └── 03b_evaluate_vision_policy.py # Evaluates vision policy from raw camera pixels
-├── tests/                      # Pytest suite covering physics, kinematics, and vision backbones
+│   ├── 03b_evaluate_vision_policy.py # Evaluates vision policy from raw camera pixels
+│   └── 04_visualize_vision_rollout.py # Exports 4-layer VLA telemetry GIFs & checkpoint comparisons
+├── tests/                      # Pytest suite covering physics, kinematics, vision, and visualizer
 └── pyproject.toml              # Dependencies and build configuration
 ```
 
@@ -130,10 +137,16 @@ uv pip install -e .
    uv run scripts/03b_evaluate_vision_policy.py --checkpoint checkpoints/run12_bottleneck_3cam/best_vision_policy.pt --mode both --ood-difficulty hard --episodes 20
    ```
 
+4. **Visualize 4-Layer VLA Telemetry & Spatial Keypoints**:
+   Render synchronized 3-camera rollout GIFs and 6-phase keyframe contact sheets showing live 2D Spatial Softmax keypoints, 3D projected future action chunk ribbons, multi-camera cross-attention weights, and physical task telemetry:
+   ```bash
+   uv run scripts/04_visualize_vision_rollout.py --checkpoint checkpoints/run12_bottleneck_3cam/best_vision_policy.pt --mode id --seed 102 --output assets/media/vla_telemetry_showcase.gif
+   ```
+
 ---
 
 ### Run Test Suite
-Run automated unit tests covering environment contracts, spawn clearance validation, IK convergence, flow matching calculus, and vision backbones:
+Run automated unit tests covering environment contracts, spawn clearance validation, IK convergence, flow matching calculus, vision backbones, and telemetry projection:
 ```bash
 uv run pytest tests/
 ```
@@ -188,6 +201,21 @@ Closed-loop evaluation benchmarks conducted across held-out in-distribution tria
 | **Run 13** | Run 12 + Neuron Dropout (`dropout=0.1` on `obs_proj` + `ResMlpBlock`) | 80.0% (16 / 20) | 84.0% (42 / 50 on Hard) | 13.4 cm / 12.8 cm | 5.19 ms |
 | **Run 14a** | 300 Clean Demos + Run 12 Config + Reduced LR (`lr=3e-4`, `0.04414 MSE`) | 95.0% (19 / 20) | 72.0% (36 / 50 on Clean Hard) | 9.5 cm / 18.5 cm | 5.82 ms |
 | **Run 14 (ID Champion)** | 300 Clean Demos + Run 12 Config + Restored LR (`lr=5e-4`, `0.02990 MSE`) | **100.0%** (20 / 20) | **90.0%** (45 / 50 on Clean Hard) | **8.1 cm** / 13.3 cm | 5.47 ms |
+
+### Explainable VLA Telemetry & Emergent Camera Attention
+
+<p align="center">
+  <img src="assets/media/vla_telemetry_showcase_strip.png" width="98%" alt="6-Phase VLA Telemetry Contact Sheet"/>
+</p>
+
+The [`VisionRolloutVisualizer`](floraflow/eval/visualizer.py) composites four internal decision layers at 20 Hz across `third_person_cam`, `overhead_cam`, and `wrist_cam`:
+1. **HUD Crosshairs (`+`)**: Top-8 highest-confidence [`SpatialSoftmax`](floraflow/policy/spatial_softmax.py) 2D keypoints ($\tau_{\text{viz}} = 0.08$) locking directly onto the plant leaves, watering can body, handle, and robot wrist.
+2. **3D Future Action Chunk Ribbon (Cyan to Amber)**: 16-step ($0.8\text{ s}$) predicted future fingertip trajectory computed via isolated MuJoCo forward kinematics (`mj_kinematics`) and projected into each camera's 2D pixel frame.
+3. **Emergent Camera Cross-Attention Switching**: Live modality weights from [`MultiCameraCrossAttention`](floraflow/policy/vision_model.py) reveal automatic phase-dependent camera selection:
+   * **Approach (Step 1)**: `overhead_cam` dominates (`62.5%`) to triangulate global $(X, Y)$ tabletop coordinates.
+   * **Millimeter Grasp (Step 39)**: `wrist_cam` spikes (`41.3%` on ID Seed 102, `51.8%` on Hard OOD Seed 204) as the fingers close around the `8 mm` handle.
+   * **Pouring (Steps 116 to 196)**: When the tilted watering can occludes `wrist_cam`, attention shifts back to `third_person_cam` and `overhead_cam` (`85%` to `97%` combined) to hold the spout at `5.3 to 8.0 cm` over the pot rim.
+4. **Physical Telemetry Strip**: Real-time scrolling plots of Spout-to-Pot distance ($\text{cm}$), Can Tilt angle ($\text{deg}$), Gripper state (`OPEN` / `GRASPED`), and Water Particles in Pot (`5 / 8`).
 
 ### Technical Highlights
 1. **Zero External Framework Dependencies**: The entire Flow Matching calculus (optimal transport probability paths, analytical velocity vector fields, and explicit Euler numerical ODE integration) is implemented directly in pure PyTorch.

@@ -9,7 +9,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 from pathlib import Path
 import time
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Callable, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
@@ -129,6 +129,7 @@ class VisionPolicyEvaluator:
         num_ode_steps: int = 10,
         temporal_ensemble: bool = True,
         ensemble_decay: float = 0.05,
+        step_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
     ) -> EpisodeResult:
         """Execute one complete closed-loop evaluation episode using raw vision."""
         torch.manual_seed(seed)
@@ -173,6 +174,27 @@ class VisionPolicyEvaluator:
                     weight_buffer[idx] += ensemble_weights[h]
 
                 blended_act = action_buffer[step_count] / max(weight_buffer[step_count], 1e-6)
+
+                if step_callback is not None:
+                    spout_d = float(np.linalg.norm(obs["spout_pos"] - obs["plant_pos"]))
+                    tilt_d = float(obs["tilt_angle_deg"][0])
+                    parts = int(obs["particles_in_pot"][0])
+                    is_pour = (tilt_d >= 40.0) and (spout_d <= 0.14)
+                    is_succ = success or (parts >= 2) or (is_pour and spout_d <= 0.14)
+                    step_callback({
+                        "step_idx": step_count,
+                        "obs": obs,
+                        "model_obs": model_obs,
+                        "pred_chunk": pred_chunk,
+                        "exec_action": blended_act,
+                        "latency_ms": latency_ms,
+                        "spout_dist": spout_d,
+                        "tilt_deg": tilt_d,
+                        "particles_in_pot": parts,
+                        "is_pouring": is_pour,
+                        "success": is_succ,
+                    })
+
                 obs, _, _, info = self.env.step(blended_act)
                 step_count += 1
 
@@ -204,6 +226,25 @@ class VisionPolicyEvaluator:
                 steps_to_exec = min(exec_horizon, max_steps - step_count)
                 for i in range(steps_to_exec):
                     action = pred_chunk[i]
+                    if step_callback is not None:
+                        spout_d = float(np.linalg.norm(obs["spout_pos"] - obs["plant_pos"]))
+                        tilt_d = float(obs["tilt_angle_deg"][0])
+                        parts = int(obs["particles_in_pot"][0])
+                        is_pour = (tilt_d >= 40.0) and (spout_d <= 0.14)
+                        is_succ = success or (parts >= 2) or (is_pour and spout_d <= 0.14)
+                        step_callback({
+                            "step_idx": step_count,
+                            "obs": obs,
+                            "model_obs": model_obs,
+                            "pred_chunk": pred_chunk[i:],
+                            "exec_action": action,
+                            "latency_ms": latency_ms,
+                            "spout_dist": spout_d,
+                            "tilt_deg": tilt_d,
+                            "particles_in_pot": parts,
+                            "is_pouring": is_pour,
+                            "success": is_succ,
+                        })
                     obs, _, _, info = self.env.step(action)
                     step_count += 1
 
