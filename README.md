@@ -8,16 +8,7 @@ It includes both a **State-Based Policy** (operating on ground-truth 3D object c
   <img src="assets/media/vla_telemetry_showcase.gif" width="96%" alt="FloraFlow 4-Layer Multi-Camera VLA Telemetry Rollout"/>
 </p>
 
-## 1. System Architecture & Formulation
-
-### Why Optimal Transport Flow Matching?
-Standard behavioral cloning with a single-step MSE loss struggles on dexterous tasks because averaging multimodal demonstrations guides the gripper between valid trajectories. Denoising Diffusion Probabilistic Models (DDPMs) represent multimodal action distributions accurately, but integrating curved stochastic paths typically requires 50 to 100 neural function evaluations (100 to 500 ms), which is too slow for a 20 Hz (`50 ms` budget) real-time control loop.
-
-Optimal Transport Conditional Flow Matching (OT-CFM) regressing straight-line probability paths between Gaussian source noise $x_0 \sim \mathcal{N}(0, I)$ and expert action chunks $x_1 \in \mathbb{R}^{H \times D_{\text{act}}}$ solves both problems:
-$$x_t = (1 - (1 - \sigma_{\min}) t) x_0 + t x_1, \quad u_t(x_1 \mid x_0) = x_1 - (1 - \sigma_{\min}) x_0$$
-Because the transport paths are straight with constant target velocity $u_t$, an explicit Euler ODE solver converges in **10 integration steps (`~5.4 ms` on Apple Silicon MPS)**, while sliding-window **Temporal Ensembling** ($w_h = \exp(-0.05 h)$) blends overlapping 16-step predictions into smooth 20 Hz actuator commands. This same action-chunking formulation underpins modern manipulation stacks such as Physical Intelligence ($\pi_0$), TRI Diffusion Policy, and ALOHA 2.
-
-### System Specifications
+## 1. System Specifications
 
 | Component | Specification |
 | :--- | :--- |
@@ -25,6 +16,7 @@ Because the transport paths are straight with constant target velocity $u_t$, an
 | **Visual Observation (`Phase 2`)** | 3 synchronized $128 \times 128$ RGB cameras: `third_person_cam`, `overhead_cam`, and wrist-mounted `wrist_cam` |
 | **Proprioception (`9D`)** | 7D arm joint angles (`qpos`) + 1D gripper finger width + 1D normalized episode phase progress |
 | **Vision Backbone** | Per-camera 4-layer ConvNet + [`SpatialSoftmax`](floraflow/policy/spatial_softmax.py) (`16` 2D keypoints, `32`-dim projection) + 4-head [`MultiCameraCrossAttention`](floraflow/policy/vision_model.py) (`192`-dim fused bottleneck) |
+| **Policy & ODE Solver** | Conditional Flow Matching ResMLP (`1.09M` params), 10-step Euler ODE (`~5.4 ms` on MPS), sliding-window Temporal Ensembling ($w_h = \exp(-0.05 h)$) |
 | **Action Chunk (`16 x 8`)** | 16-step horizon ($0.8\text{ s}$): 7 target joint positions (`rad`) + 1 gripper command (`+1` open, `-1` close) |
 | **Datasets** | **Vision**: 300 collision-validated demos ($52,200$ transitions) · **State**: 500 widened demos ($87,000$ transitions) |
 
