@@ -57,11 +57,11 @@ class ConditionalFlowMatcher:
         # Predict vector field velocity
         v_pred = model(x_t, t, obs)
 
-        # Weighted mean squared error (joint angles: 1.0, gripper: gripper_weight)
+        # Weighted mean squared error (arm pose: 1.0, gripper final dim: gripper_weight)
         sq_err = (v_pred - u_t) ** 2
         weights = torch.ones(x1.shape[-1], device=device, dtype=torch.float32)
         if weights.shape[0] >= 8:
-            weights[7] = self.gripper_weight
+            weights[-1] = self.gripper_weight
         loss = (sq_err * weights).mean()
 
         metrics = {

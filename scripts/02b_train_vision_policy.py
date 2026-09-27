@@ -46,6 +46,7 @@ def train_vision_policy(
     use_progress: bool = True,
     proprio_history_lags: Tuple[int, ...] = (0,),
     trim_stationary: bool = False,
+    action_space: str = "joint_abs",
     device_str: str = "auto",
     cameras: Optional[Tuple[str, ...]] = None,
 ) -> None:
@@ -84,6 +85,7 @@ def train_vision_policy(
         use_progress=use_progress,
         proprio_history_lags=proprio_history_lags,
         trim_stationary=trim_stationary,
+        action_space=action_space,
     )
     loader = DataLoader(
         dataset,
@@ -94,7 +96,7 @@ def train_vision_policy(
     )
     print(
         f"Dataset loaded: {len(dataset)} samples across {len(loader)} batches/epoch "
-        f"(proprio_dim={dataset.proprio_dim}, use_progress={use_progress}, lags={dataset.proprio_history_lags}, trim_stationary={trim_stationary})."
+        f"(proprio_dim={dataset.proprio_dim}, action_space={action_space}, use_progress={use_progress}, lags={dataset.proprio_history_lags}, trim_stationary={trim_stationary})."
     )
 
     # Save normalization statistics
@@ -104,7 +106,7 @@ def train_vision_policy(
 
     # 2. Instantiate Policy Network and CFM matcher
     model = VisionFlowMatchingPolicy(
-        act_dim=8,
+        act_dim=dataset.act_dim,
         horizon=horizon,
         proprio_dim=dataset.proprio_dim,
         num_keypoints=num_keypoints,
@@ -214,7 +216,8 @@ def train_vision_policy(
                     "optimizer_state_dict": optimizer.state_dict(),
                     "loss": best_loss,
                     "config": {
-                        "act_dim": 8,
+                        "act_dim": dataset.act_dim,
+                        "action_space": action_space,
                         "horizon": horizon,
                         "proprio_dim": dataset.proprio_dim,
                         "use_progress": use_progress,
@@ -273,6 +276,13 @@ def main() -> None:
         help="Causal step lags for temporal proprioception memory (e.g. 0 4 8 12)",
     )
     parser.add_argument("--trim-stationary", action="store_true", help="Filter out zero-velocity stationary grasp-dwell frames")
+    parser.add_argument(
+        "--action-space",
+        type=str,
+        default="joint_abs",
+        choices=["joint_abs", "joint_delta", "eef_se3"],
+        help="Action chunk parameterization ('joint_abs', 'joint_delta', or 'eef_se3')",
+    )
     parser.add_argument("--cameras", nargs="+", default=None, help="Names of cameras to train with (defaults to auto-detect from dataset)")
     parser.add_argument("--device", type=str, default="auto", help="Compute device: auto, cpu, cuda, or mps")
     args = parser.parse_args()
@@ -299,6 +309,7 @@ def main() -> None:
         use_progress=not args.no_progress,
         proprio_history_lags=tuple(args.proprio_history_lags),
         trim_stationary=args.trim_stationary,
+        action_space=args.action_space,
         device_str=args.device,
         cameras=tuple(args.cameras) if args.cameras is not None else None,
     )

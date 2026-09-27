@@ -19,6 +19,24 @@ class IKResult:
     final_rot: np.ndarray
 
 
+def rotmat_to_rot6d(rot: np.ndarray) -> np.ndarray:
+    """Convert 3x3 rotation matrix R in SO(3) to Zhou et al. 6D continuous representation [r1, r2]."""
+    r = np.asarray(rot, dtype=np.float32).reshape(3, 3)
+    return np.concatenate([r[:, 0], r[:, 1]], axis=-1).astype(np.float32)
+
+
+def rot6d_to_rotmat(rot6d: np.ndarray) -> np.ndarray:
+    """Recover orthogonal 3x3 rotation matrix R in SO(3) from 6D vector via Gram-Schmidt."""
+    v = np.asarray(rot6d, dtype=np.float64).reshape(6)
+    a1 = v[0:3]
+    a2 = v[3:6]
+    b1 = a1 / max(float(np.linalg.norm(a1)), 1e-8)
+    u2 = a2 - float(np.dot(b1, a2)) * b1
+    b2 = u2 / max(float(np.linalg.norm(u2)), 1e-8)
+    b3 = np.cross(b1, b2)
+    return np.column_stack([b1, b2, b3])
+
+
 class IKSolver:
     """Damped Least-Squares (DLS) Inverse Kinematics solver with nullspace posture control."""
 

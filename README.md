@@ -14,10 +14,10 @@ It includes both a **State-Based Policy** (operating on ground-truth 3D object c
 | :--- | :--- |
 | **Simulation & Physics** | MuJoCo 3.x, 7-DoF Franka Emika Panda arm + parallel-jaw gripper, `500 Hz` physics (`dt = 2 ms`, 25 substeps), `20 Hz` policy control |
 | **Visual Observation (`Phase 2`)** | 3 synchronized $128 \times 128$ RGB cameras: `third_person_cam`, `overhead_cam`, and wrist-mounted `wrist_cam` |
-| **Proprioception (`8D`)** | 7D arm joint angles (`qpos`) + 1D gripper finger width (clock-free physical state; optional 4-tap history or 9D legacy progress) |
+| **Proprioception (`8D` / `10D`)** | Clock-free `8D` joint state (`7D qpos + 1D grip`) or embodiment-agnostic `10D` fingertip `SE(3)` pose (`3D pos + 6D rot6d + 1D grip`) |
 | **Vision Backbone** | Per-camera 4-layer ConvNet + [`SpatialSoftmax`](floraflow/policy/spatial_softmax.py) (`16` 2D keypoints, `32`-dim projection) + 4-head [`MultiCameraCrossAttention`](floraflow/policy/vision_model.py) (`192`-dim fused bottleneck) |
 | **Policy & ODE Solver** | Conditional Flow Matching ResMLP (`1.09M` params), 10-step Euler ODE (`~5.2 ms` on MPS), sliding-window Temporal Ensembling ($w_h = \exp(-0.05 h)$) |
-| **Action Chunk (`16 x 8`)** | 16-step horizon ($0.8\text{ s}$): 7 target joint positions (`rad`) + 1 gripper command (`+1` open, `-1` close) |
+| **Action Chunk (`16 x 8` / `16 x 10`)** | 16-step horizon ($0.8\text{ s}$): `joint_abs` (`8D`), `joint_delta` (`8D`), or 6-DoF/7-DoF hardware-agnostic `eef_se3` (`10D`: `3D pos + 6D rot6d + 1D grip`) |
 | **Datasets** | **Vision**: 300 collision-validated demos ($52,200$ raw / $47,103$ active trimmed transitions) · **State**: 500 widened demos ($87,000$ transitions) |
 
 
@@ -104,13 +104,13 @@ uv pip install -e .
    ```
 
 2. **Train Vision Flow Matching Policy**:
-   Train the 1.09M-parameter `VisionFlowMatchingPolicy` (3-camera 16-keypoint Spatial Softmax CNN encoders + 4-head Multi-Camera Cross-Attention + `192`-dim compressed bottleneck + clock-free `8D` physical proprioception with stationary dwell trimming):
+   Train the 1.09M-parameter `VisionFlowMatchingPolicy` (supports `--action-space {joint_abs,joint_delta,eef_se3}`):
    ```bash
-   uv run scripts/02b_train_vision_policy.py --data data/watering_demos_vision_3cam_300.h5 --save-dir checkpoints/run15c_clock_free_trimmed8d --num-keypoints 16 --vision-feat-dim 32 --shift-aug 4 --epochs 40 --batch-size 128 --use-cross-attention --no-progress --trim-stationary
+   uv run scripts/02b_train_vision_policy.py --data data/watering_demos_vision_3cam_300.h5 --save-dir checkpoints/run15c_clock_free_trimmed8d --num-keypoints 16 --vision-feat-dim 32 --shift-aug 0 --epochs 40 --batch-size 128 --use-cross-attention --no-progress --trim-stationary --action-space joint_abs
    ```
 
 3. **Evaluate Closed-Loop Vision Policy**:
-   Benchmark closed-loop execution strictly from raw camera pixels and `8D` physical proprioception without simulator coordinates or a synthetic clock:
+   Benchmark closed-loop execution strictly from raw camera pixels and physical proprioception without simulator coordinates or a synthetic clock:
    ```bash
    uv run scripts/03b_evaluate_vision_policy.py --checkpoint checkpoints/run15c_clock_free_trimmed8d/best_vision_policy.pt --mode both --ood-difficulty hard --episodes 20
    ```
@@ -162,7 +162,7 @@ Closed-loop evaluation benchmarks conducted across held-out in-distribution tria
 
 #### Vision Optimization Progression
 
-Full ablation details, failure-mode forensics, and step-by-step experimental derivations across all 15 runs are documented in [`docs/optimization_experiment_log.md`](docs/optimization_experiment_log.md).
+Full ablation details, failure-mode forensics, and step-by-step experimental derivations across all 16 runs are documented in [`docs/optimization_experiment_log.md`](docs/optimization_experiment_log.md).
 
 | Iteration | Configuration | In-Distribution (20 Seeds) | Hard Out-of-Distribution (50 Seeds) | Spout Error (ID / OOD) | Mean Latency |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -179,7 +179,9 @@ Full ablation details, failure-mode forensics, and step-by-step experimental der
 | **Run 14** | 300 Clean Demos + Run 12 Config + Restored LR (`lr=5e-4`, `9D` w/ Clock) | **100.0%** (20 / 20) | **90.0%** (45 / 50 on Clean Hard) | **8.1 cm** / 13.3 cm | 5.47 ms |
 | **Run 15a** | Run 14 Config + Clock-Free Single-Frame Proprioception (`8D` Raw, Untrimmed) | 35.0% (7 / 20) | - | 28.5 cm / - | 5.23 ms |
 | **Run 15b** | Run 14 Config + Clock-Free 4-Tap Proprioceptive History (`32D`, `lags=0,4,8,16`) | 90.0% (18 / 20) | 78.0% (39 / 50 on Clean Hard) | 9.9 cm / 15.4 cm | 5.30 ms |
-| **Run 15c (Unified Champion)** | Run 14 Config + Clock-Free `8D` Proprioception + Stationary Dwell Trimming | **100.0%** (20 / 20) | **96.0%** (48 / 50 on Clean Hard) | **8.0 cm** / **9.9 cm** | **5.21 ms** |
+| **Run 15c (Unified Champion)** | Run 14 Config + Clock-Free `8D` Proprioception + Stationary Dwell Trimming (`joint_abs`) | **100.0%** (20 / 20) | **96.0%** (48 / 50 on Clean Hard) | **8.0 cm** / 9.9 cm | **5.21 ms** |
+| **Run 16a** | Run 15c Config + Relative Joint-Delta Action Chunks (`joint_delta`, `8D`) | **100.0%** (20 / 20) | **88.0%** (44 / 50 on Clean Hard) | 8.8 cm / 13.2 cm | 5.59 ms |
+| **Run 16b (`SE(3)` Task Space)** | Run 15c Config + 6-DoF/7-DoF Agnostic `10D` Fingertip `SE(3)` + `rot6d` (`eef_se3`) | 80.0% (16 / 20) | **88.0%** (44 / 50 on Clean Hard) | 10.0 cm / **9.6 cm** | 6.05 ms |
 
 ### Explainable VLA Telemetry & Emergent Camera Attention
 

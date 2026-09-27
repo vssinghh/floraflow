@@ -414,3 +414,73 @@ def test_clock_free_8d_proprioception_dataset_and_policy() -> None:
     assert sampled.shape == (b, 4, 8)
 
 
+def test_vision_dataset_joint_delta_roundtrip() -> None:
+    """Test that action_space='joint_delta' computes horizon-wise stats and reconstructs original motor targets."""
+    rng = np.random.default_rng(42)
+    with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
+        qpos = rng.normal(0.0, 0.5, size=(12, 7)).astype(np.float32)
+        grip = np.ones((12, 1), dtype=np.float32) * 0.04
+        actions = np.concatenate([qpos + rng.normal(0.0, 0.05, size=(12, 7)).astype(np.float32), np.ones((12, 1), dtype=np.float32)], axis=-1)
+        with h5py.File(tmp.name, "w") as f:
+            grp = f.create_group("data/demo_0")
+            obs_grp = grp.create_group("obs")
+            obs_grp.create_dataset("rgb_third_person_cam", data=np.zeros((12, 128, 128, 3), dtype=np.uint8))
+            obs_grp.create_dataset("rgb_overhead_cam", data=np.zeros((12, 128, 128, 3), dtype=np.uint8))
+            obs_grp.create_dataset("arm_qpos", data=qpos)
+            obs_grp.create_dataset("gripper_width", data=grip)
+            grp.create_dataset("actions", data=actions)
+
+        ds_abs = VisionWateringDataset(h5_path=tmp.name, horizon=4, use_progress=False, action_space="joint_abs")
+        ds_delta = VisionWateringDataset(h5_path=tmp.name, horizon=4, use_progress=False, action_space="joint_delta")
+
+        assert ds_delta.stats["act_mean"].shape == (4, 8)
+        assert ds_delta.stats["act_std"].shape == (4, 8)
+
+        for t in range(8):
+            _, norm_abs = ds_abs[t]
+            _, norm_delta = ds_delta[t]
+            raw_abs = ds_abs.unnormalize_action(norm_abs.numpy())
+            raw_delta = ds_delta.unnormalize_action(norm_delta.numpy())
+
+            reconstructed = raw_delta.copy()
+            reconstructed[:, :7] = qpos[t : t + 1, :7] + raw_delta[:, :7]
+            assert np.allclose(reconstructed, raw_abs, atol=1e-5)
+
+
+def test_vision_dataset_eef_se3_and_rot6d() -> None:
+    """Test that action_space='eef_se3' yields 10D task-space proprioception and 10D SE(3) action chunks."""
+    from floraflow.expert.ik_solver import rot6d_to_rotmat, rotmat_to_rot6d
+
+    # 1. Verify rotmat -> rot6d -> rotmat round-trip on a 50-deg Y-pitch rotation
+    theta = np.radians(-50.0)
+    c, s = np.cos(theta), np.sin(theta)
+    r_orig = np.array([[c, 0.0, s], [0.0, 1.0, 0.0], [-s, 0.0, c]], dtype=np.float64)
+    r6 = rotmat_to_rot6d(r_orig)
+    assert r6.shape == (6,)
+    r_rec = rot6d_to_rotmat(r6)
+    assert np.allclose(r_rec, r_orig, atol=1e-6)
+    assert np.allclose(r_rec.T @ r_rec, np.eye(3), atol=1e-6)
+
+    # 2. Verify VisionWateringDataset with action_space="eef_se3"
+    rng = np.random.default_rng(7)
+    with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
+        qpos = rng.normal(0.0, 0.3, size=(10, 7)).astype(np.float32)
+        grip = np.ones((10, 1), dtype=np.float32) * 0.04
+        actions = np.concatenate([qpos, -np.ones((10, 1), dtype=np.float32)], axis=-1)
+        with h5py.File(tmp.name, "w") as f:
+            grp = f.create_group("data/demo_0")
+            obs_grp = grp.create_group("obs")
+            obs_grp.create_dataset("rgb_third_person_cam", data=np.zeros((10, 128, 128, 3), dtype=np.uint8))
+            obs_grp.create_dataset("rgb_overhead_cam", data=np.zeros((10, 128, 128, 3), dtype=np.uint8))
+            obs_grp.create_dataset("arm_qpos", data=qpos)
+            obs_grp.create_dataset("gripper_width", data=grip)
+            grp.create_dataset("actions", data=actions)
+
+        ds_se3 = VisionWateringDataset(h5_path=tmp.name, horizon=4, use_progress=False, action_space="eef_se3")
+        assert ds_se3.proprio_dim == 10
+        assert ds_se3.act_dim == 10
+        obs_0, act_0 = ds_se3[0]
+        assert obs_0["proprio"].shape == (10,)
+        assert act_0.shape == (4, 10)
+
+

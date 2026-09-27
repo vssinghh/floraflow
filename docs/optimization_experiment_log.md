@@ -804,3 +804,36 @@ HARD OUT-OF-DISTRIBUTION (Validated collision-free 5-10 cm shifts, 50 episodes):
   - In Run 14, the synthetic `step_idx / 174.0` clock forced the gripper to close around `Step 28` even when the watering can was spawned at the far diagonal corners of the Hard OOD workspace, causing the fingers to close `4 mm` short of the handle.
   - In **Run 15c**, because the synthetic clock is gone, the policy waits until `wrist_cam` visually confirms the handle is inside the fingers before closing (`100%` pass rate across `Seeds 211, 212, 232, 238, 240`). And because `--trim-stationary` excised the 12 dead grasp-dwell frames, the policy lifts immediately once `gripper_width` reaches `2.32 cm`, matching the Phase 1 Oracle State Policy (`100.0% ID`, `96.0% Hard OOD`) strictly from raw camera pixels and `8D` physical joint/gripper proprioception.
 
+## 22. Embodiment-Agnostic Task-Space (`SE(3)`) & Relative-Delta Action Chunking (Run 16a, Run 16b)
+
+### 1. First-Principles Motivation: Why Parameterize Action Chunks Beyond Absolute 7-DoF Joint Angles?
+- **What is it?**
+  We extended [`VisionWateringDataset`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/data/vision_dataset.py), [`VisionPolicyEvaluator`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/eval/vision_evaluator.py), and [`scripts/02b_train_vision_policy.py`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/scripts/02b_train_vision_policy.py) with selectable `--action-space` modes (`joint_abs`, `joint_delta`, `eef_se3`) plus Zhou et al. (CVPR 2019) continuous 6D rotation helpers ([`rotmat_to_rot6d`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/expert/ik_solver.py#L22-L25) and [`rot6d_to_rotmat`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/expert/ik_solver.py#L28-L37) in [`floraflow/expert/ik_solver.py`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/expert/ik_solver.py)).
+- **Why do we evaluate three action spaces?**
+  1. **`joint_abs` (`Run 15c`, `8D` Proprio $\rightarrow$ `8D` Target Joint Angles)**: Direct joint PD position targets $a_{t+h}^{(0:7)}$ for a 7-DoF Franka arm.
+  2. **`joint_delta` (`Run 16a`, `8D` Proprio $\rightarrow$ `8D` Relative Joint Deltas)**: Predicts chunk-anchored relative joint changes $\Delta a_{t, h}^{(0:7)} = a_{t+h}^{(0:7)} - q_t$ normalized with `(16, 8)` horizon-wise statistics so immediate step $h = 0$ ($\sigma \approx 0.02\text{ rad}$) and lookahead step $h = 15$ ($\sigma \approx 0.25\text{ rad}$) receive equal Flow Matching gradient weight.
+  3. **`eef_se3` (`Run 16b`, `10D` Fingertip `SE(3)` Proprio $\rightarrow$ `10D` Fingertip `SE(3)` Targets)**: Converts both proprioception (`[pinch_pos (3D), pinch_rot6d (6D), gripper_width (1D)]`) and action chunks (`[target_pos (3D), target_rot6d (6D), grip_cmd (1D)]`) into 3D End-Effector Task Space via MuJoCo Forward Kinematics (`0.72 s` load-time conversion across all `47,103` frames) and tracks predictions at 20 Hz using Damped Least-Squares [`IKSolver`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/expert/ik_solver.py) (`0.09 ms/step`). Because `10D` `eef_se3` never references the 7 Franka joint angles, the exact same network architecture and pretrained weights are compatible with both 6-DoF desktop arms (UFactory Lite 6, AgileX Piper, Elephant Robotics myCobot 280) and 7-DoF arms.
+
+### 2. Benchmark Evaluation Results (`Run 15c` vs. `Run 16a` vs. `Run 16b`)
+
+| Metric | **Run 15c (`joint_abs`, 40 ep)** | **Run 16a (`joint_delta`, 60 ep)** | **Run 16b (`eef_se3`, 40 ep)** |
+| :--- | :--- | :--- | :--- |
+| **Proprioception Input** | `8D`: `[7D qpos, 1D grip]` | `8D`: `[7D qpos, 1D grip]` | **`10D`**: `[3D pinch_pos, 6D rot6d, 1D grip]` |
+| **Action Chunk Output** | `8D`: `[7D q_target, 1D grip]` | `8D`: `[7D (q_target - q_t), 1D grip]` | **`10D`**: `[3D pos_cmd, 6D rot6d_cmd, 1D grip]` |
+| **6-DoF / 7-DoF Embodiment Agnostic?** | No (7 Franka joints) | No (7 Franka joints) | **Yes (`SE(3)` Fingertip Task Space)** |
+| **In-Distribution (20 Seeds)** | **100.0% (20 / 20)** | **100.0% (20 / 20)** | **80.0% (16 / 20)** |
+| **Hard OOD (50 Clean Seeds)** | **96.0% (48 / 50)** | **88.0% (44 / 50)** | **88.0% (44 / 50)** |
+| **Mean Spout Error (ID / OOD)** | **`8.0 cm`** / `9.9 cm` | `8.8 cm` / `13.2 cm` | `10.0 cm` / **`9.6 cm`** |
+| **Mean Max Tilt (ID / OOD)** | `85.8°` / `88.0°` | `84.6°` / `82.4°` | `80.4°` / `81.8°` |
+| **Mean Fluid Particles (ID / OOD)** | `0.65` / **`0.90`** | `0.45` / `0.06` | `0.10` / **`0.88`** |
+| **Mean Inference + Control Latency** | **`5.21 ms`** | `5.59 ms` | `6.05 ms` |
+
+### 3. First-Principles Physical Findings from Step 2 Telemetry
+
+1. **Why `joint_abs` (`Run 15c`) Outperforms `joint_delta` (`Run 16a`) Under `4x` Heavy Watering-Can Payloads (`100%` vs `60%`)**:
+   - When we scaled the watering can physical mass and inertia by `3.0x` and `4.0x` in MuJoCo (`model.body_mass[can_bid] *= scale`), both `Run 15c` and `Run 16a` achieved `100.0%` (`10 / 10`) at `3.0x` mass, but at `4.0x` mass `Run 15c` stayed at **`100.0%` (`9.8 cm` error)** while `Run 16a` dropped to **`60.0%` (`19.5 cm` error)**.
+   - **Mathematical Root Cause**: In a PD position servo, actuator torque is $\tau = k_p (q_{\text{cmd}} - q_t)$. Under `joint_abs`, when a `4x` heavy payload causes $q_t$ to lag behind $q_{\text{cmd}}$, the error $(q_{\text{cmd}} - q_t)$ grows 4x larger and automatically generates 4x higher corrective lifting torque. Under `joint_delta`, substituting $q_{\text{cmd}} = q_t + \Delta q_{\text{pred}}$ into the PD equation gives $\tau = k_p ((q_t + \Delta q_{\text{pred}}) - q_t) = k_p \Delta q_{\text{pred}}$: the measured position $q_t$ algebraically cancels out, capping maximum lifting torque at the small `1.0x`-mass tracking offset $\Delta q_{\text{pred}} \approx 0.02\text{ rad}$.
+2. **Why `eef_se3` (`Run 16b`) Achieves the Tightest Hard OOD Spout Accuracy (`9.6 cm`, `0.88` Particles) While Grazing 4 Close-In Spawns on the 7-DoF Franka**:
+   - Once the watering can is grasped, transporting the spout to the plant pot and tilting `50°` is a pure 3D Cartesian task, allowing `Run 16b` (`eef_se3`) to achieve **`9.6 cm` mean spout alignment error** (beating both `Run 15c`'s `9.9 cm` and `Run 16a`'s `13.2 cm`) and **`0.88` particles/episode** on Hard OOD.
+   - On 4 close-in ID spawns (`Seeds 103, 110, 111, 113`), averaging 3D `(x, y, z)` coordinates during the pre-grasp approach (`t = 8..10`) creates a straight diagonal 3D path (`z = 47.2 cm`) instead of the high curved 7-DoF joint-interpolated arc used by [`PourExpertPlanner`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/expert/pour_planner.py#L90-L94), causing the open left finger to graze the watering can spout during approach.
+
