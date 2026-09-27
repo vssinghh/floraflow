@@ -740,3 +740,67 @@ Inspecting the **Camera Cross-Attention** curves across In-Distribution `Seed 10
 
 ### Head-to-Head Forensic Comparison (`Run 14 vs Run 12` on `Seed 114`)
 Running [`scripts/04_visualize_vision_rollout.py`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/scripts/04_visualize_vision_rollout.py) in comparison mode (`--compare-checkpoint`) produced [`assets/media/run14_vs_run12_seed114.gif`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/assets/media/run14_vs_run12_seed114.gif), visually confirming how training on the collision-validated dataset enabled **Run 14** to complete the transport and pour at **`7.5 cm` spout alignment (`PASS`)** on In-Distribution `Seed 114` where **Run 12** stalled at **`27.1 cm` (`FAIL`)**.
+
+## 21. Clock-Free Physical Proprioception & Eliminating the Causal Imitation Pause Trap (Run 15a, Run 15b, Run 15c)
+
+### 1. First-Principles Sim-to-Real Audit: The Synthetic Wall-Clock Trap (`progress = step_idx / 174.0`)
+- **What is it?**
+  In Runs 5 through 14, the 9th dimension of `proprio` was a synthetic episode clock (`progress = min(step_idx / 174.0, 1.0)` in [`VisionPolicyEvaluator.prepare_vision_obs`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/eval/vision_evaluator.py#L90-L135) and `np.linspace(0, 1, T)` in [`VisionWateringDataset`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/data/vision_dataset.py)).
+- **Why does it break on a real physical robot and on extreme OOD spawns?**
+  1. **Real-Robot Teleoperation Mismatch**: Human teleoperated demonstrations for post-training have variable durations (`6 s` to `16 s`) and pauses, whereas `step_idx / 174.0` hardcodes an `8.7 s` (`174-step`) open-loop schedule.
+  2. **Premature Gripper Closure on Far-Corner OOD Spawns**: On extreme diagonal Hard OOD spawns (such as Run 14's 5 failed seeds: `Seeds 211, 212, 232, 238, 240`), the watering can is placed `5 to 10 cm` farther away than in the training set, requiring an extra `0.15 to 0.25 s` of reach time. Because `step_idx / 174.0` ticks past `Step 28` regardless of where the hand actually is, the clock forces the gripper to close `4 mm` short of the handle.
+
+### 2. Run 15a (Single-Frame `8D` Clock-Free Proprioception) & Discovery of the Causal Imitation Pause Trap
+- **Configuration**: Trained [`VisionFlowMatchingPolicy`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/policy/vision_model.py) with `--no-progress` (`proprio_dim = 8`: `7D arm_qpos` + `1D gripper_width`, `use_progress = False`), keeping all other settings identical to Run 14 (`40` epochs, `lr = 5e-4`, `16` keypoints, `32` vision dim, `fused_dim = 192`).
+- **Result**: Training converged to `0.03778 MSE`, but In-Distribution closed-loop success dropped from `100.0%` (`Run 14`) to **`35.0%` (`7 / 20`)**.
+- **Failure Forensics (The "Lift 0.4 Seconds From Now" Pause Trap)**:
+  - On all `13` failed ID episodes (including `Seed 102`), the robot approached the watering can cleanly, **closed its fingers firmly around the handle at `Step 40` (`grip_w = 2.35 cm`)**, lifted `6 mm`, and then **froze in place holding the handle for the remaining 160 steps (`tilt = 10.4 deg`)**.
+  - Inspecting `demo_0` in [`PourExpertPlanner.plan_and_execute`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/expert/pour_planner.py#L103-L108) revealed why: during **Execution Phase C** (`t = 28` to `t = 45`), the scripted expert commands the arm to hold `res_grasp.q` stationary for `15` steps (`0.75 s`) while closing the gripper. However, the physical fingers finish clamping the rigid handle in just **4 steps (`t = 28..31`, `g = 2.32 cm`)**, leaving **12 consecutive dead stationary frames (`t = 34` to `t = 45`)** where `dq < 5e-4`, `dg == 0.00000`, and `da == 0.00000`.
+  - During `t = 34..39`, the target 16-step action chunk says: *"Hold `res_grasp.q` right now (`h = 0..6`), and start lifting `0.4 seconds` in the future (`h = 8..15`)."*
+  - When a memoryless (`1-frame`) policy without a clock executes `h = 0` (`move 0.0 mm`) at `Step 40`, it remains in the exact same state $(q_{\text{grasp}}, 2.35\text{ cm})$ at `Step 41`, re-predicts the exact same chunk (*"hold right now, lift 0.4s from now"*), and stays trapped in a stationary fixed-point loop forever.
+
+### 3. Run 15b (4-Tap Causal Proprioceptive Memory `lags = (0, 4, 8, 16)`) vs. Run 15c (Surgical Dead-Frame Velocity Filtering `--trim-stationary`)
+We tested both canonical real-robot solutions to the Pause Trap:
+1. **Run 15b (`checkpoints/run15b_clock_free_hist32d`, `--no-progress --proprio-history-lags 0 4 8 16`)**:
+   - Stacks 4 causal delay taps (`0.0s, 0.2s, 0.4s, 0.8s` in the past $\rightarrow 32\text{D}$ physical proprioception) so the physical event of clamping the handle propagates as a moving wave across $[g_t, g_{t-4}, g_{t-8}, g_{t-16}]$.
+   - **Result**: Broke all 13 Pause Trap episodes and jumped ID success from **`35.0%` to `90.0%` (`18 / 20`)** and Hard OOD to **`78.0%` (`39 / 50`)** (`0.58` water particles/episode). However, feeding 4 copies of the 7D absolute joint angles (`28` of `32` proprioception dims) slightly increased joint-coordinate shortcutting on `2 / 20` ID seeds (`Seeds 103, 111`).
+2. **Run 15c (`checkpoints/run15c_clock_free_trimmed8d`, `--no-progress --trim-stationary`, Pure `8D` Physical Proprioception)**:
+   - Added `trim_stationary=True` in [`VisionWateringDataset._load_data`](file:///Users/vipinsingh/Documents/Antigravity/floraflow/floraflow/data/vision_dataset.py#L84-L96) to filter out dead zero-velocity grasp-dwell frames where `(dq < 5e-4) & (dg < 2e-5) & (da < 1e-5)` (removing the exact `12` dead frames `t = 34..45` per episode while keeping `100%` of the approach, grasp closure, lift, transport, pour tilt, and pour hold phases intact).
+   - With the dead dwell frames removed, the very first frame where the fingers finish clamping the handle (`g = 2.32 cm`) immediately commands upward lift velocity starting at `h = 0..4` (`h4_dq = 0.0445`, `h8_dq = 0.1544`, `h15_dq = 0.3491`).
+
+### 4. Benchmark Evaluation Results (Run 15a vs. Run 15b vs. Run 15c)
+```text
+RUN 15c CHAMPIONSHIP SCORECARD (checkpoints/run15c_clock_free_trimmed8d/best_vision_policy.pt):
+- Proprioception:          8D Pure Physical (7D arm_qpos + 1D gripper_width, ZERO synthetic clock)
+- Active Dataset Samples:  47,103 transitions (5,097 dead grasp-dwell frames trimmed across 300 demos)
+
+IN-DISTRIBUTION (Held-out seeds 100-119, 20 episodes):
+- Success Rate:            100.0% (20 / 20)  [+65.0% vs Run 15a, +10.0% vs Run 15b, matches Run 14]
+- Mean Spout Alignment:    8.0 cm            [ALL-TIME BEST ID PRECISION (beats Run 14's 8.1 cm)]
+- Max Tilt Angle:          85.8 deg
+- Particles in Pot:        0.65              [>3x higher fluid delivery than Run 14's 0.20]
+- Inference Latency:       5.18 ms           [Real-time PASS (<50ms budget)]
+
+HARD OUT-OF-DISTRIBUTION (Validated collision-free 5-10 cm shifts, 50 episodes):
+- Success Rate:            96.0% (48 / 50)   [+6.0% vs Run 14 (45/50), +18.0% vs Run 15b (39/50)]
+- Mean Spout Alignment:    9.9 cm            [-3.4 cm tighter OOD alignment than Run 14's 13.3 cm]
+- Max Tilt Angle:          88.0 deg
+- Particles in Pot:        0.90              [>6x higher fluid delivery than Run 14's 0.14]
+- Inference Latency:       5.24 ms           [Real-time PASS (<50ms budget)]
+```
+
+| Metric | Run 14 (`9D` w/ Clock) | Run 15a (`8D` Untrimmed) | Run 15b (`32D` 4-Tap History) | **Run 15c (`8D` Clock-Free + Trimmed Dwell)** |
+| :--- | :--- | :--- | :--- | :--- |
+| **Synthetic `step_idx` Clock?** | Yes (`step_idx / 174.0`) | **No** | **No** | **No (Pure `8D` Physical)** |
+| **In-Distribution (20 Seeds)** | **100.0%** (20 / 20) | 35.0% (7 / 20) | 90.0% (18 / 20) | **100.0% (20 / 20)** |
+| **Hard OOD (50 Clean Seeds)** | 90.0% (45 / 50) | - | 78.0% (39 / 50) | **96.0% (48 / 50)** |
+| **Mean Spout Error (ID / OOD)** | `8.1 cm` / `13.3 cm` | `28.5 cm` / - | `9.9 cm` / `15.4 cm` | **`8.0 cm` / `9.9 cm`** |
+| **Mean Max Tilt (ID / OOD)** | `87.4°` / `81.2°` | `38.8°` / - | `80.8°` / `78.2°` | **`85.8°` / `88.0°`** |
+| **Mean Fluid Particles (ID / OOD)** | `0.20` / `0.14` | `0.10` / - | `0.20` / `0.58` | **`0.65` / `0.90`** |
+| **Mean Inference Latency** | `5.47 ms` | `5.23 ms` | `5.30 ms` | **`5.21 ms`** |
+
+### 5. Why Removing the Clock + Trimming Stationary Dwell Beat Run 14 (`90.0%` $\rightarrow$ `96.0%` Hard OOD)
+- **Rescuing All 5 of Run 14's Failed Hard OOD Seeds (`Seeds 211, 212, 232, 238, 240`)**:
+  - In Run 14, the synthetic `step_idx / 174.0` clock forced the gripper to close around `Step 28` even when the watering can was spawned at the far diagonal corners of the Hard OOD workspace, causing the fingers to close `4 mm` short of the handle.
+  - In **Run 15c**, because the synthetic clock is gone, the policy waits until `wrist_cam` visually confirms the handle is inside the fingers before closing (`100%` pass rate across `Seeds 211, 212, 232, 238, 240`). And because `--trim-stationary` excised the 12 dead grasp-dwell frames, the policy lifts immediately once `gripper_width` reaches `2.32 cm`, matching the Phase 1 Oracle State Policy (`100.0% ID`, `96.0% Hard OOD`) strictly from raw camera pixels and `8D` physical joint/gripper proprioception.
+

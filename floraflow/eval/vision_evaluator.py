@@ -55,12 +55,16 @@ class VisionPolicyEvaluator:
 
         self.horizon = config["horizon"]
         self.act_dim = config["act_dim"]
+        self.proprio_dim = int(config.get("proprio_dim", 9))
+        self.use_progress = bool(config.get("use_progress", self.proprio_dim == 9))
+        self.proprio_history_lags: Tuple[int, ...] = tuple(int(l) for l in config.get("proprio_history_lags", [0]))
+        self._proprio_buffer: List[np.ndarray] = []
         self.cameras = tuple(config.get("cameras", ["third_person_cam", "overhead_cam"]))
 
         self.model = VisionFlowMatchingPolicy(
             act_dim=self.act_dim,
             horizon=self.horizon,
-            proprio_dim=config["proprio_dim"],
+            proprio_dim=self.proprio_dim,
             num_keypoints=config["num_keypoints"],
             vision_feat_dim=config["vision_feat_dim"],
             proprio_feat_dim=config["proprio_feat_dim"],
@@ -94,7 +98,7 @@ class VisionPolicyEvaluator:
     ) -> Dict[str, torch.Tensor]:
         """Convert environment observations into normalized PyTorch model inputs.
 
-        Strictly extracts ONLY raw camera frames and 9D proprioception (7 qpos + 1 gripper + 1 progress).
+        Strictly extracts ONLY raw camera frames and physical proprioception (8D, multi-tap history, or 9D legacy).
         Does NOT access can_pos, plant_pos, spout_pos, or grip_pos.
         """
         model_obs: Dict[str, torch.Tensor] = {}
@@ -105,13 +109,30 @@ class VisionPolicyEvaluator:
             img_tensor = torch.from_numpy(raw_img).permute(2, 0, 1).unsqueeze(0).float() / 255.0
             model_obs[f"rgb_{cam}"] = img_tensor.to(self.device)
 
-        # Assemble 9D proprioception: (7D arm_qpos + 1D gripper_width + 1D progress)
+        # Assemble base proprioception: 8D physical (7D arm_qpos + 1D gripper_width) or 9D (+ 1D progress)
         arm_qpos = env_obs["arm_qpos"]
         gripper_w = env_obs["gripper_width"]
         if np.ndim(gripper_w) == 0:
             gripper_w = np.array([gripper_w], dtype=np.float32)
-        progress = np.array([min(step_idx / 174.0, 1.0)], dtype=np.float32)
-        proprio = np.concatenate([arm_qpos, gripper_w, progress], axis=-1).astype(np.float32)
+        if self.use_progress:
+            progress = np.array([min(step_idx / 174.0, 1.0)], dtype=np.float32)
+            base_proprio = np.concatenate([arm_qpos, gripper_w, progress], axis=-1).astype(np.float32)
+        else:
+            base_proprio = np.concatenate([arm_qpos, gripper_w], axis=-1).astype(np.float32)
+
+        if step_idx == 0 or len(self._proprio_buffer) == 0:
+            self._proprio_buffer = [base_proprio]
+        else:
+            self._proprio_buffer.append(base_proprio)
+
+        if self.proprio_history_lags == (0,):
+            proprio = base_proprio
+        else:
+            curr_idx = len(self._proprio_buffer) - 1
+            proprio = np.concatenate(
+                [self._proprio_buffer[max(0, curr_idx - lag)] for lag in self.proprio_history_lags],
+                axis=-1,
+            ).astype(np.float32)
 
         proprio_tensor = torch.from_numpy(proprio).to(self.device).unsqueeze(0)
         norm_proprio = (proprio_tensor - self.proprio_mean) / self.proprio_std
@@ -133,6 +154,7 @@ class VisionPolicyEvaluator:
     ) -> EpisodeResult:
         """Execute one complete closed-loop evaluation episode using raw vision."""
         torch.manual_seed(seed)
+        self._proprio_buffer.clear()
         obs = self.env.reset(seed=seed, can_xy=can_xy, plant_xy=plant_xy)
         actual_can_xy = (float(obs["can_pos"][0]), float(obs["can_pos"][1]))
         actual_plant_xy = (float(obs["plant_pos"][0]), float(obs["plant_pos"][1]))

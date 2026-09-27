@@ -343,3 +343,74 @@ def test_bottleneck_and_keypoint_noise() -> None:
     eval1 = policy.extract_obs_features(batch_obs)
     eval2 = policy.extract_obs_features(batch_obs)
     assert torch.allclose(eval1, eval2)
+
+
+def test_clock_free_8d_proprioception_dataset_and_policy() -> None:
+    """Test that use_progress=False yields pure 8D physical proprioception without synthetic step clock."""
+    with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
+        with h5py.File(tmp.name, "w") as f:
+            grp = f.create_group("data/demo_0")
+            obs_grp = grp.create_group("obs")
+            obs_grp.create_dataset("rgb_third_person_cam", data=np.zeros((10, 128, 128, 3), dtype=np.uint8))
+            obs_grp.create_dataset("rgb_overhead_cam", data=np.zeros((10, 128, 128, 3), dtype=np.uint8))
+            obs_grp.create_dataset("arm_qpos", data=np.ones((10, 7), dtype=np.float32) * 0.5)
+            obs_grp.create_dataset("gripper_width", data=np.ones((10, 1), dtype=np.float32) * 0.08)
+            grp.create_dataset("actions", data=np.zeros((10, 8), dtype=np.float32))
+
+        dataset = VisionWateringDataset(h5_path=tmp.name, horizon=4, use_progress=False)
+        assert dataset.proprio_dim == 8
+        assert dataset.use_progress is False
+        assert dataset.stats["proprio_mean"].shape == (8,)
+        assert dataset.stats["proprio_std"].shape == (8,)
+
+        obs_0, act_0 = dataset[0]
+        obs_9, _ = dataset[9]
+        assert obs_0["proprio"].shape == (8,)
+        assert act_0.shape == (4, 8)
+        # Since arm_qpos and gripper_width are identical at t=0 and t=9, clock-free proprio must be identical
+        assert torch.allclose(obs_0["proprio"], obs_9["proprio"])
+
+        # Also verify 4-tap causal proprioception history (lags=(0, 4, 8, 12) -> 32D)
+        dataset_hist = VisionWateringDataset(
+            h5_path=tmp.name,
+            horizon=4,
+            use_progress=False,
+            proprio_history_lags=(0, 4, 8, 12),
+        )
+        assert dataset_hist.proprio_dim == 32
+        obs_h0, _ = dataset_hist[0]
+        assert obs_h0["proprio"].shape == (32,)
+
+        # Verify trim_stationary=True drops the 9 stationary frames (t=1..9) and keeps t=0
+        dataset_trim = VisionWateringDataset(
+            h5_path=tmp.name,
+            horizon=4,
+            use_progress=False,
+            trim_stationary=True,
+        )
+        assert len(dataset_trim) == 1
+        assert dataset_trim.proprio_dim == 8
+
+    policy = VisionFlowMatchingPolicy(
+        act_dim=8,
+        horizon=4,
+        proprio_dim=8,
+        num_keypoints=16,
+        vision_feat_dim=32,
+        proprio_feat_dim=64,
+        hidden_dim=128,
+        num_blocks=2,
+        cameras=("third_person_cam", "overhead_cam"),
+        use_cross_attention=True,
+    )
+    b = 2
+    batch_obs = {
+        "rgb_third_person_cam": torch.randint(0, 256, (b, 128, 128, 3), dtype=torch.uint8),
+        "rgb_overhead_cam": torch.randint(0, 256, (b, 128, 128, 3), dtype=torch.uint8),
+        "proprio": torch.randn(b, 8),
+    }
+    cfm = ConditionalFlowMatcher()
+    sampled = cfm.sample(policy, batch_obs, horizon=4, act_dim=8, num_steps=2)
+    assert sampled.shape == (b, 4, 8)
+
+

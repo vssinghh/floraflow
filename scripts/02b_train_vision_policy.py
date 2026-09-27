@@ -43,6 +43,9 @@ def train_vision_policy(
     dropout_cameras: Tuple[str, ...] = ("wrist_cam",),
     use_aux_pose: bool = False,
     aux_pose_weight: float = 0.5,
+    use_progress: bool = True,
+    proprio_history_lags: Tuple[int, ...] = (0,),
+    trim_stationary: bool = False,
     device_str: str = "auto",
     cameras: Optional[Tuple[str, ...]] = None,
 ) -> None:
@@ -78,6 +81,9 @@ def train_vision_policy(
         horizon=horizon,
         cameras=cameras,
         preload=True,
+        use_progress=use_progress,
+        proprio_history_lags=proprio_history_lags,
+        trim_stationary=trim_stationary,
     )
     loader = DataLoader(
         dataset,
@@ -86,7 +92,10 @@ def train_vision_policy(
         drop_last=True,
         num_workers=0,
     )
-    print(f"Dataset loaded: {len(dataset)} samples across {len(loader)} batches/epoch.")
+    print(
+        f"Dataset loaded: {len(dataset)} samples across {len(loader)} batches/epoch "
+        f"(proprio_dim={dataset.proprio_dim}, use_progress={use_progress}, lags={dataset.proprio_history_lags}, trim_stationary={trim_stationary})."
+    )
 
     # Save normalization statistics
     stats_file = save_path / "vision_stats.json"
@@ -97,7 +106,7 @@ def train_vision_policy(
     model = VisionFlowMatchingPolicy(
         act_dim=8,
         horizon=horizon,
-        proprio_dim=9,
+        proprio_dim=dataset.proprio_dim,
         num_keypoints=num_keypoints,
         vision_feat_dim=vision_feat_dim,
         proprio_feat_dim=proprio_feat_dim,
@@ -207,7 +216,10 @@ def train_vision_policy(
                     "config": {
                         "act_dim": 8,
                         "horizon": horizon,
-                        "proprio_dim": 9,
+                        "proprio_dim": dataset.proprio_dim,
+                        "use_progress": use_progress,
+                        "proprio_history_lags": list(dataset.proprio_history_lags),
+                        "trim_stationary": trim_stationary,
                         "num_keypoints": num_keypoints,
                         "vision_feat_dim": vision_feat_dim,
                         "proprio_feat_dim": proprio_feat_dim,
@@ -252,6 +264,15 @@ def main() -> None:
     parser.add_argument("--dropout-cameras", nargs="+", default=["wrist_cam"], help="Cameras eligible for dropout")
     parser.add_argument("--use-aux-pose", action="store_true", help="Enable 1-Layer 3D Ruler Quiz auxiliary pose supervision")
     parser.add_argument("--aux-pose-weight", type=float, default=0.5, help="Weight for 3D Ruler Quiz auxiliary loss")
+    parser.add_argument("--no-progress", action="store_true", help="Exclude synthetic wall-clock progress from proprioception (use pure 8D physical proprioception)")
+    parser.add_argument(
+        "--proprio-history-lags",
+        nargs="+",
+        type=int,
+        default=[0],
+        help="Causal step lags for temporal proprioception memory (e.g. 0 4 8 12)",
+    )
+    parser.add_argument("--trim-stationary", action="store_true", help="Filter out zero-velocity stationary grasp-dwell frames")
     parser.add_argument("--cameras", nargs="+", default=None, help="Names of cameras to train with (defaults to auto-detect from dataset)")
     parser.add_argument("--device", type=str, default="auto", help="Compute device: auto, cpu, cuda, or mps")
     args = parser.parse_args()
@@ -275,6 +296,9 @@ def main() -> None:
         dropout_cameras=tuple(args.dropout_cameras),
         use_aux_pose=args.use_aux_pose,
         aux_pose_weight=args.aux_pose_weight,
+        use_progress=not args.no_progress,
+        proprio_history_lags=tuple(args.proprio_history_lags),
+        trim_stationary=args.trim_stationary,
         device_str=args.device,
         cameras=tuple(args.cameras) if args.cameras is not None else None,
     )

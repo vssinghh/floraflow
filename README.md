@@ -14,11 +14,11 @@ It includes both a **State-Based Policy** (operating on ground-truth 3D object c
 | :--- | :--- |
 | **Simulation & Physics** | MuJoCo 3.x, 7-DoF Franka Emika Panda arm + parallel-jaw gripper, `500 Hz` physics (`dt = 2 ms`, 25 substeps), `20 Hz` policy control |
 | **Visual Observation (`Phase 2`)** | 3 synchronized $128 \times 128$ RGB cameras: `third_person_cam`, `overhead_cam`, and wrist-mounted `wrist_cam` |
-| **Proprioception (`9D`)** | 7D arm joint angles (`qpos`) + 1D gripper finger width + 1D normalized episode phase progress |
+| **Proprioception (`8D`)** | 7D arm joint angles (`qpos`) + 1D gripper finger width (clock-free physical state; optional 4-tap history or 9D legacy progress) |
 | **Vision Backbone** | Per-camera 4-layer ConvNet + [`SpatialSoftmax`](floraflow/policy/spatial_softmax.py) (`16` 2D keypoints, `32`-dim projection) + 4-head [`MultiCameraCrossAttention`](floraflow/policy/vision_model.py) (`192`-dim fused bottleneck) |
-| **Policy & ODE Solver** | Conditional Flow Matching ResMLP (`1.09M` params), 10-step Euler ODE (`~5.4 ms` on MPS), sliding-window Temporal Ensembling ($w_h = \exp(-0.05 h)$) |
+| **Policy & ODE Solver** | Conditional Flow Matching ResMLP (`1.09M` params), 10-step Euler ODE (`~5.2 ms` on MPS), sliding-window Temporal Ensembling ($w_h = \exp(-0.05 h)$) |
 | **Action Chunk (`16 x 8`)** | 16-step horizon ($0.8\text{ s}$): 7 target joint positions (`rad`) + 1 gripper command (`+1` open, `-1` close) |
-| **Datasets** | **Vision**: 300 collision-validated demos ($52,200$ transitions) · **State**: 500 widened demos ($87,000$ transitions) |
+| **Datasets** | **Vision**: 300 collision-validated demos ($52,200$ raw / $47,103$ active trimmed transitions) · **State**: 500 widened demos ($87,000$ transitions) |
 
 
 ## 2. Directory Structure
@@ -98,27 +98,27 @@ uv pip install -e .
 ### Phase 2: Pixel-to-Action Vision Policy (Raw Camera Pixels)
 
 1. **Collect Multi-Camera Demonstrations**:
-   Generate 300 collision-free synchronized demonstration episodes ($52,200$ steps) recording tri-view $128 \times 128$ RGB camera streams (`third_person_cam`, `overhead_cam`, and eye-in-hand `wrist_cam`) alongside 9D robot proprioception:
+   Generate 300 collision-free synchronized demonstration episodes ($52,200$ steps) recording tri-view $128 \times 128$ RGB camera streams (`third_person_cam`, `overhead_cam`, and eye-in-hand `wrist_cam`) alongside robot proprioception:
    ```bash
    uv run scripts/01b_generate_vision_demos.py --num-demos 300 --output data/watering_demos_vision_3cam_300.h5
    ```
 
 2. **Train Vision Flow Matching Policy**:
-   Train the 1.09M-parameter `VisionFlowMatchingPolicy` (3-camera 16-keypoint Spatial Softmax CNN encoders + 4-head Multi-Camera Cross-Attention + `192`-dim compressed bottleneck + Flow Matching ResMLP):
+   Train the 1.09M-parameter `VisionFlowMatchingPolicy` (3-camera 16-keypoint Spatial Softmax CNN encoders + 4-head Multi-Camera Cross-Attention + `192`-dim compressed bottleneck + clock-free `8D` physical proprioception with stationary dwell trimming):
    ```bash
-   uv run scripts/02b_train_vision_policy.py --data data/watering_demos_vision_3cam_300.h5 --save-dir checkpoints/run14_clean_data_3cam --num-keypoints 16 --vision-feat-dim 32 --shift-aug 4 --epochs 40 --batch-size 128 --use-cross-attention
+   uv run scripts/02b_train_vision_policy.py --data data/watering_demos_vision_3cam_300.h5 --save-dir checkpoints/run15c_clock_free_trimmed8d --num-keypoints 16 --vision-feat-dim 32 --shift-aug 4 --epochs 40 --batch-size 128 --use-cross-attention --no-progress --trim-stationary
    ```
 
 3. **Evaluate Closed-Loop Vision Policy**:
-   Benchmark closed-loop execution strictly from raw camera pixels without simulator coordinates:
+   Benchmark closed-loop execution strictly from raw camera pixels and `8D` physical proprioception without simulator coordinates or a synthetic clock:
    ```bash
-   uv run scripts/03b_evaluate_vision_policy.py --checkpoint checkpoints/run12_bottleneck_3cam/best_vision_policy.pt --mode both --ood-difficulty hard --episodes 20
+   uv run scripts/03b_evaluate_vision_policy.py --checkpoint checkpoints/run15c_clock_free_trimmed8d/best_vision_policy.pt --mode both --ood-difficulty hard --episodes 20
    ```
 
 4. **Visualize 4-Layer VLA Telemetry & Spatial Keypoints**:
    Render synchronized 3-camera rollout GIFs and 6-phase keyframe contact sheets showing live 2D Spatial Softmax keypoints, 3D projected future action chunk ribbons, multi-camera cross-attention weights, and physical task telemetry:
    ```bash
-   uv run scripts/04_visualize_vision_rollout.py --checkpoint checkpoints/run12_bottleneck_3cam/best_vision_policy.pt --mode id --seed 102 --output assets/media/vla_telemetry_showcase.gif
+   uv run scripts/04_visualize_vision_rollout.py --checkpoint checkpoints/run15c_clock_free_trimmed8d/best_vision_policy.pt --mode id --seed 102 --output assets/media/vla_telemetry_showcase.gif
    ```
 
 ### Run Test Suite
@@ -148,21 +148,21 @@ Closed-loop evaluation benchmarks conducted across held-out in-distribution tria
 | **Mean Inference Latency** | **3.59 ms** | **3.56 ms** | **< 50.0 ms (20 Hz)** |
 | **Real-Time Control Constraint** | **PASS** | **PASS** | Sub-15 ms target |
 
-### Phase 2: Vision Policy Scorecard (Raw Pixels, Zero Cheats)
+### Phase 2: Vision Policy Scorecard (Raw Pixels & Clock-Free Physical Proprioception)
 
-| Evaluation Metric | In-Distribution (20 Seeds, Run 14 / Run 12) | Hard Out-of-Distribution (50 Seeds, Run 12 / Run 14) | Real-Time Requirement |
+| Evaluation Metric | In-Distribution (20 Seeds, Run 15c) | Hard Out-of-Distribution (50 Clean Seeds, Run 15c / Run 12) | Real-Time Requirement |
 | :--- | :--- | :--- | :--- |
 | **Total Evaluation Episodes** | 20 episodes | 50 episodes | - |
-| **Task Success Rate** | **100.0%** (20 / 20) / **95.0%** (19 / 20) | **100.0%** (50 / 50) / **90.0%** (45 / 50) | > 70% |
-| **Mean Maximum Tilt Angle** | **87.4°** / **87.0°** | **83.6°** / **81.2°** | > 40.0° |
-| **Mean Spout Alignment Error** | **8.1 cm** / **8.7 cm** | **8.5 cm** / **13.3 cm** | < 14.0 cm |
-| **Mean Fluid Particles in Pot** | **0.20** / **0.85** | **0.66** / **0.14** | > 0 |
-| **Mean Inference Latency** | **5.46 ms** / **5.22 ms** | **5.96 ms** / **5.47 ms** | **< 50.0 ms (20 Hz)** |
+| **Task Success Rate** | **100.0%** (20 / 20) | **96.0%** (48 / 50) / **100.0%** (50 / 50) | > 70% |
+| **Mean Maximum Tilt Angle** | **85.8°** | **88.0°** / **83.6°** | > 40.0° |
+| **Mean Spout Alignment Error** | **8.0 cm** | **9.9 cm** / **8.5 cm** | < 14.0 cm |
+| **Mean Fluid Particles in Pot** | **0.65** | **0.90** / **0.66** | > 0 |
+| **Mean Inference Latency** | **5.18 ms** | **5.24 ms** / **5.96 ms** | **< 50.0 ms (20 Hz)** |
 | **Real-Time Control Constraint** | **PASS (<50 ms)** | **PASS (<50 ms)** | Sub-15 ms target |
 
 #### Vision Optimization Progression
 
-Full ablation details, failure-mode forensics, and step-by-step experimental derivations across all 14 runs are documented in [`docs/optimization_experiment_log.md`](docs/optimization_experiment_log.md).
+Full ablation details, failure-mode forensics, and step-by-step experimental derivations across all 15 runs are documented in [`docs/optimization_experiment_log.md`](docs/optimization_experiment_log.md).
 
 | Iteration | Configuration | In-Distribution (20 Seeds) | Hard Out-of-Distribution (50 Seeds) | Spout Error (ID / OOD) | Mean Latency |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -176,7 +176,10 @@ Full ablation details, failure-mode forensics, and step-by-step experimental der
 | **Run 12 (OOD Champion)** | 300 Demos + Bottleneck Compression (`16` kp, `32` dim, `fused_dim=192`) | **95.0%** (19 / 20) | **86.0%** (Raw) / **100.0%** (50 / 50 Clean Hard) | **8.7 cm** / **8.5 cm** | 5.22 ms |
 | **Run 13** | Run 12 + Neuron Dropout (`dropout=0.1` on `obs_proj` + `ResMlpBlock`) | 80.0% (16 / 20) | 84.0% (42 / 50 on Hard) | 13.4 cm / 12.8 cm | 5.19 ms |
 | **Run 14a** | 300 Clean Demos + Run 12 Config + Reduced LR (`lr=3e-4`, `0.04414 MSE`) | 95.0% (19 / 20) | 72.0% (36 / 50 on Clean Hard) | 9.5 cm / 18.5 cm | 5.82 ms |
-| **Run 14 (ID Champion)** | 300 Clean Demos + Run 12 Config + Restored LR (`lr=5e-4`, `0.02990 MSE`) | **100.0%** (20 / 20) | **90.0%** (45 / 50 on Clean Hard) | **8.1 cm** / 13.3 cm | 5.47 ms |
+| **Run 14** | 300 Clean Demos + Run 12 Config + Restored LR (`lr=5e-4`, `9D` w/ Clock) | **100.0%** (20 / 20) | **90.0%** (45 / 50 on Clean Hard) | **8.1 cm** / 13.3 cm | 5.47 ms |
+| **Run 15a** | Run 14 Config + Clock-Free Single-Frame Proprioception (`8D` Raw, Untrimmed) | 35.0% (7 / 20) | - | 28.5 cm / - | 5.23 ms |
+| **Run 15b** | Run 14 Config + Clock-Free 4-Tap Proprioceptive History (`32D`, `lags=0,4,8,16`) | 90.0% (18 / 20) | 78.0% (39 / 50 on Clean Hard) | 9.9 cm / 15.4 cm | 5.30 ms |
+| **Run 15c (Unified Champion)** | Run 14 Config + Clock-Free `8D` Proprioception + Stationary Dwell Trimming | **100.0%** (20 / 20) | **96.0%** (48 / 50 on Clean Hard) | **8.0 cm** / **9.9 cm** | **5.21 ms** |
 
 ### Explainable VLA Telemetry & Emergent Camera Attention
 

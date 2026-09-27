@@ -26,6 +26,9 @@ class VisionWateringDataset(Dataset):
         cameras: Tuple[str, ...] = ("third_person_cam", "overhead_cam"),
         stats: Optional[Dict[str, np.ndarray]] = None,
         preload: bool = True,
+        use_progress: bool = True,
+        proprio_history_lags: Tuple[int, ...] = (0,),
+        trim_stationary: bool = False,
     ) -> None:
         """Initialize Vision Demonstration Dataset.
 
@@ -35,12 +38,20 @@ class VisionWateringDataset(Dataset):
             cameras: Names of camera streams to load.
             stats: Optional precomputed normalization statistics dictionary.
             preload: If True, loads all images and proprioception into RAM for zero-disk-IO training.
+            use_progress: If True, appends synthetic [0, 1] step progress clock (9D). If False, uses pure 8D physical proprioception (7D arm_qpos + 1D gripper_width).
+            proprio_history_lags: Causal step lags (e.g. (0, 4, 8, 12)) to stack for temporal proprioception memory without a wall-clock timer.
+            trim_stationary: If True, filters out zero-velocity stationary grasp-dwell frames where arm, gripper, and target actions are completely static.
         """
         super().__init__()
         self.h5_path = Path(h5_path).resolve()
         self.horizon = horizon
         self.cameras = cameras
         self.preload = preload
+        self.use_progress = use_progress
+        self.proprio_history_lags = tuple(int(l) for l in proprio_history_lags)
+        self.trim_stationary = trim_stationary
+        base_dim = 9 if use_progress else 8
+        self.proprio_dim = base_dim * len(self.proprio_history_lags)
 
         self.episodes_images: Dict[str, List[np.ndarray]] = {cam: [] for cam in cameras}
         self.episodes_proprio: List[np.ndarray] = []
@@ -70,13 +81,39 @@ class VisionWateringDataset(Dataset):
                 actions = np.array(demo["actions"], dtype=np.float32)
                 T = len(actions)
 
-                # Assemble 9D proprioception (7D arm_qpos + 1D gripper_width + 1D progress)
+                # Assemble base proprioception: 8D physical (7D arm_qpos + 1D gripper_width) or 9D (+ 1D progress)
                 arm_qpos = np.array(obs_grp["arm_qpos"], dtype=np.float32)
                 gripper_width = np.array(obs_grp["gripper_width"], dtype=np.float32)
                 if gripper_width.ndim == 1:
                     gripper_width = gripper_width[:, None]
-                progress = np.linspace(0.0, 1.0, T, dtype=np.float32)[:, None]
-                proprio = np.concatenate([arm_qpos, gripper_width, progress], axis=-1)
+
+                keep_mask: Optional[np.ndarray] = None
+                if self.trim_stationary and T > 2:
+                    dq = np.linalg.norm(np.diff(arm_qpos, axis=0, prepend=arm_qpos[:1]), axis=1)
+                    dg = np.abs(np.diff(gripper_width[:, 0], prepend=gripper_width[:1, 0]))
+                    da = np.linalg.norm(np.diff(actions[:, :7], axis=0, prepend=actions[:1, :7]), axis=1)
+                    dead_mask = (np.arange(T) > 0) & (dq < 5e-4) & (dg < 2e-5) & (da < 1e-5)
+                    if np.any(~dead_mask):
+                        keep_mask = ~dead_mask
+                        arm_qpos = arm_qpos[keep_mask]
+                        gripper_width = gripper_width[keep_mask]
+                        actions = actions[keep_mask]
+                        T = len(actions)
+
+                if self.use_progress:
+                    progress = np.linspace(0.0, 1.0, T, dtype=np.float32)[:, None]
+                    base_proprio = np.concatenate([arm_qpos, gripper_width, progress], axis=-1)
+                else:
+                    base_proprio = np.concatenate([arm_qpos, gripper_width], axis=-1)
+
+                if self.proprio_history_lags == (0,):
+                    proprio = base_proprio
+                else:
+                    lagged_list = []
+                    for lag in self.proprio_history_lags:
+                        idx = np.clip(np.arange(T) - lag, 0, T - 1)
+                        lagged_list.append(base_proprio[idx])
+                    proprio = np.concatenate(lagged_list, axis=-1)
 
                 self.episodes_proprio.append(proprio)
                 self.episodes_act.append(actions)
@@ -87,6 +124,8 @@ class VisionWateringDataset(Dataset):
                     spout_pos = np.array(obs_grp["spout_pos"], dtype=np.float32)
                     plant_pos = np.array(obs_grp["plant_pos"], dtype=np.float32)
                     pose = np.concatenate([grip_pos, spout_pos, plant_pos], axis=-1)
+                    if keep_mask is not None:
+                        pose = pose[keep_mask]
                     self.episodes_pose.append(pose)
                     self.has_aux_pose = True
 
@@ -94,6 +133,8 @@ class VisionWateringDataset(Dataset):
                 for cam in self.cameras:
                     cam_key = f"rgb_{cam}"
                     img_data = np.array(obs_grp[cam_key], dtype=np.uint8)
+                    if keep_mask is not None:
+                        img_data = img_data[keep_mask]
                     self.episodes_images[cam].append(img_data)
 
                 for t in range(T):
