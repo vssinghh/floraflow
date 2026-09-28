@@ -33,16 +33,18 @@ venv/
 .coverage
 htmlcov/
 
-# Data artifacts and models (large binaries)
+# Data artifacts and models (large binaries synced to Google Drive)
 /data
 data/*.h5
 data/*.hdf5
 datasets/*.h5
 datasets/*.hdf5
-checkpoints/*.pt
-checkpoints/*.pth
-checkpoints/**/*.pt
-checkpoints/**/*.pth
+!datasets/README.md
+checkpoints/*
+!checkpoints/README.md
+!checkpoints/run15c_clock_free_trimmed8d/
+!checkpoints/run15c_clock_free_trimmed8d/best_vision_policy.pt
+!checkpoints/run15c_clock_free_trimmed8d/vision_stats.json
 *.mp4
 *.png
 !assets/*.png

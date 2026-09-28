@@ -61,9 +61,12 @@ class ConditionalFlowMatcher:
 
         # Weighted mean squared error (arm pose: 1.0, gripper final dim: gripper_weight)
         sq_err = (v_pred.float() - u_t.float()) ** 2
-        weights = torch.ones(x1.shape[-1], device=device, dtype=torch.float32)
-        if weights.shape[0] >= 8:
-            weights[-1] = self.gripper_weight
+        act_dim = x1.shape[-1]
+        if act_dim >= 8:
+            w_list = [1.0] * (act_dim - 1) + [float(self.gripper_weight)]
+            weights = torch.tensor(w_list, device=device, dtype=torch.float32)
+        else:
+            weights = torch.ones(act_dim, device=device, dtype=torch.float32)
         loss = (sq_err * weights).mean()
 
         loss_det = loss.detach()

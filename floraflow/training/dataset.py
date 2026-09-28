@@ -462,7 +462,7 @@ class VisionWateringDataset(Dataset):
         for cam in self.cameras:
             cam_key = f"rgb_{cam}"
             img_dev = self._cached_images[cam][batch_indices].to(device)
-            img_f32 = img_dev.permute(0, 3, 1, 2).float().div_(255.0)
+            img_f32 = img_dev.permute(0, 3, 1, 2).float() * (1.0 / 255.0)
             if shifter is not None:
                 img_f32 = shifter(img_f32)
             dev_obs[cam_key] = img_f32

@@ -18,7 +18,7 @@ It includes both a **State-Based Policy** (operating on ground-truth 3D object c
 | **Vision Backbone** | Per-camera 4-layer ConvNet + [`SpatialSoftmax`](floraflow/training/spatial_softmax.py) (`16` 2D keypoints, `32`-dim projection) + 4-head [`MultiCameraCrossAttention`](floraflow/training/vision_model.py) (`192`-dim fused bottleneck) |
 | **Policy & ODE Solver** | Conditional Flow Matching ResMLP (`1.09M` params), 10-step Euler ODE (`~5.2 ms` on MPS), sliding-window Temporal Ensembling ($w_h = \exp(-0.05 h)$) |
 | **Action Chunk (`16 x 8` / `16 x 10`)** | 16-step horizon ($0.8\text{ s}$): `joint_abs` (`8D`), `joint_delta` (`8D`), or 6-DoF/7-DoF hardware-agnostic `eef_se3` (`10D`: `3D pos + 6D rot6d + 1D grip`) |
-| **Datasets** | **Vision**: 300 collision-validated demos ($52,200$ raw / $47,103$ active trimmed transitions) · **State**: 500 widened demos ($87,000$ transitions) |
+| **Datasets & Checkpoints Archive** | **Vision**: 300 collision-validated demos ($52,200$ raw / $47,103$ active trimmed transitions) · **State**: 500 widened demos ($87,000$ transitions) · [**Google Drive Archive**](https://drive.google.com/drive/folders/1H5BHfbyAeGmpzyOtLy23bXUdGH2hlc66?usp=sharing) |
 
 
 ## 2. Directory Structure
@@ -31,8 +31,8 @@ floraflow/
 │   ├── debug/                  # Diagnostic camera inspection frames
 │   └── scenes/
 │       └── desk_scene.xml      # Tabletop scene: arm, plant, watering can, water particles
-├── datasets/                   # Actual Data: HDF5 demonstration archives (.h5)
-├── checkpoints/                # Trained Model Weights (.pt) and normalization stats (.json)
+├── datasets/                   # Actual Data: HDF5 demonstration archives (.h5) & Drive links
+├── checkpoints/                # Tracked Champion Model (run15c) & Drive archive links
 ├── docs/                       # Optimization experiment log and architecture guides
 ├── floraflow/
 │   ├── common/                 # Shared Simulation & Kinematics Foundation
@@ -45,6 +45,7 @@ floraflow/
 │   │   └── collector.py        # State and multi-camera HDF5 demonstration collectors
 │   ├── training/               # Pillar 2: Training Pipeline (`python -m floraflow.training`)
 │   │   ├── __main__.py         # Self-contained CLI entrypoint (`floraflow-train`)
+│   │   ├── colab_train.ipynb   # 3-cell Google Colab GPU/TPU runner notebook
 │   │   ├── dataset.py          # State and multi-camera HDF5 dataset loaders (GPU uint8 batching)
 │   │   ├── augmentation.py     # RandomShifter GPU spatial shift augmentation
 │   │   ├── spatial_softmax.py  # Differentiable Spatial Softmax 2D keypoint extraction layer
