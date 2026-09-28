@@ -343,9 +343,10 @@ class VisionFlowMatchingPolicy(nn.Module):
                 if cam in self.dropout_cameras:
                     drop_decisions[:, idx] = torch.rand(b, device=proprio.device) < self.camera_dropout
 
-            # Ensure at least one camera remains active for every sample (branch-free for XLA/TPU)
+            # Ensure at least one camera remains active for every sample
             all_dropped = drop_decisions.all(dim=-1)
-            drop_decisions[:, 0] = drop_decisions[:, 0] & (~all_dropped)
+            if all_dropped.any():
+                drop_decisions[all_dropped, 0] = False
 
             for idx in range(len(self.cameras)):
                 keep_factor = (~drop_decisions[:, idx]).unsqueeze(1).float()

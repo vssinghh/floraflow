@@ -1,6 +1,6 @@
 # FloraFlow Demonstration Datasets
 
-All raw HDF5 demonstration archives (`.h5`) are hosted in our public Google Drive folder so they can be downloaded locally or mounted directly into Google Colab (`/content/drive/MyDrive/floraflow/datasets/`) without exceeding GitHub's `100 MB` file size limit.
+All raw HDF5 demonstration archives (`.h5`) are hosted in our public Google Drive archive so they can be downloaded locally without exceeding GitHub's `100 MB` file size limit.
 
 * **FloraFlow Google Drive Root**: [`floraflow/`](https://drive.google.com/drive/folders/1H5BHfbyAeGmpzyOtLy23bXUdGH2hlc66?usp=sharing)
 * **Datasets Subfolder**: [`floraflow/datasets/`](https://drive.google.com/drive/folders/1guVQ41Lgj5fnXVw6fcNSwlFRxCedAMV3?usp=sharing)

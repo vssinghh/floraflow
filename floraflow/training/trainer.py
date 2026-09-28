@@ -22,25 +22,12 @@ from floraflow.training.vision_model import VisionFlowMatchingPolicy
 
 
 def resolve_compute_device(device_str: str = "auto") -> torch.device:
-    """Resolve PyTorch compute device (mps, cuda, xla/tpu, or cpu)."""
-    if device_str in ("tpu", "xla"):
-        import torch_xla.core.xla_model as xm  # type: ignore[import-not-found]
-
-        return xm.xla_device()
+    """Resolve PyTorch compute device (mps, cuda, or cpu)."""
     if device_str == "auto":
         if torch.backends.mps.is_available():
             return torch.device("mps")
         if torch.cuda.is_available():
             return torch.device("cuda")
-        try:
-            import os
-
-            if any(k.startswith("TPU_") or k.startswith("COLAB_TPU") for k in os.environ):
-                import torch_xla.core.xla_model as xm  # type: ignore[import-not-found]
-
-                return xm.xla_device()
-        except ImportError:
-            pass
         return torch.device("cpu")
     return torch.device(device_str)
 
@@ -287,9 +274,6 @@ def train_vision_policy(
 
     best_loss = float("inf")
     t_start = time.time()
-    is_xla = device.type == "xla"
-    if is_xla:
-        print("TPU/XLA active: Epoch 1 will compile the static HLO graph (~15-25s warmup).")
 
     print("\nStarting Vision Flow Matching training loop:")
     for epoch in range(1, epochs + 1):
@@ -305,7 +289,7 @@ def train_vision_policy(
             batch_indices = perm[b_idx * batch_size : (b_idx + 1) * batch_size]
             dev_obs, dev_actions = dataset.get_batch(batch_indices, device=device, shifter=shifter)
 
-            optimizer.zero_grad(set_to_none=not is_xla)
+            optimizer.zero_grad(set_to_none=True)
             cfm_loss, metrics = cfm.compute_loss(model, dev_actions, dev_obs, async_metrics=True)
             if use_aux_pose and "aux_pose" in dev_obs:
                 pose_loss = model.compute_aux_pose_loss(dev_obs["aux_pose"])
@@ -316,12 +300,7 @@ def train_vision_policy(
             loss.backward()
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
-            if is_xla:
-                import torch_xla.core.xla_model as xm  # type: ignore[import-not-found]
-
-                xm.optimizer_step(optimizer)
-            else:
-                optimizer.step()
+            optimizer.step()
 
             epoch_loss_t += metrics["loss"]
             epoch_v_norm_t += metrics["v_norm"]
@@ -352,11 +331,10 @@ def train_vision_policy(
         if mean_loss < best_loss:
             best_loss = mean_loss
             ckpt_path = save_path / "best_vision_policy.pt"
-            cpu_model_state = {k: v.detach().cpu() for k, v in model.state_dict().items()}
             torch.save(
                 {
                     "epoch": epoch,
-                    "model_state_dict": cpu_model_state,
+                    "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "loss": best_loss,
                     "config": {

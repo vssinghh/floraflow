@@ -45,7 +45,6 @@ floraflow/
 │   │   └── collector.py        # State and multi-camera HDF5 demonstration collectors
 │   ├── training/               # Pillar 2: Training Pipeline (`python -m floraflow.training`)
 │   │   ├── __main__.py         # Self-contained CLI entrypoint (`floraflow-train`)
-│   │   ├── colab_train.ipynb   # 3-cell Google Colab GPU/TPU runner notebook
 │   │   ├── dataset.py          # State and multi-camera HDF5 dataset loaders (GPU uint8 batching)
 │   │   ├── augmentation.py     # RandomShifter GPU spatial shift augmentation
 │   │   ├── spatial_softmax.py  # Differentiable Spatial Softmax 2D keypoint extraction layer
