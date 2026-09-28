@@ -28,6 +28,12 @@ dev = [
     "ruff>=0.1.0",
 ]
 
+[project.scripts]
+floraflow-collect = "floraflow.collection.__main__:main"
+floraflow-train = "floraflow.training.__main__:main"
+floraflow-eval = "floraflow.evaluation.__main__:main"
+floraflow-visualize = "floraflow.evaluation.visualize:main"
+
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["floraflow*"]

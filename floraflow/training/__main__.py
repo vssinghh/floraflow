@@ -1,20 +1,36 @@
-"""CLI Entrypoint: Train Multi-Camera Vision Flow Matching Policy.
+"""Self-Contained CLI Entrypoint for Policy Training (`python -m floraflow.training`).
 
-Delegates to floraflow.training.trainer.train_vision_policy.
+Supports both multi-camera Vision Flow Matching training (default) and
+low-dimensional state-based Flow Matching training (`--state`).
 """
 
 from __future__ import annotations
 
 import argparse
 
-from floraflow.training.trainer import train_vision_policy
+from floraflow.training.trainer import train_policy, train_vision_policy
 
-__all__ = ["train_vision_policy", "main"]
+__all__ = ["train_policy", "train_vision_policy", "main"]
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Train Vision Flow Matching Action Chunker Policy")
-    parser.add_argument("--data", type=str, default="datasets/watering_demos_vision_3cam_300.h5", help="Path to HDF5 demos")
+    parser = argparse.ArgumentParser(
+        prog="python -m floraflow.training",
+        description="Train FloraFlow Conditional Flow Matching Policy (vision or state)",
+    )
+    parser.add_argument(
+        "--state",
+        action="store_true",
+        help="Train low-dimensional state-only policy instead of multi-camera vision policy",
+    )
+    parser.add_argument(
+        "--data",
+        "--data-path",
+        dest="data",
+        type=str,
+        default="datasets/watering_demos_vision_3cam_300.h5",
+        help="Path to HDF5 demonstration dataset",
+    )
     parser.add_argument("--save-dir", type=str, default="checkpoints", help="Directory to save checkpoints")
     parser.add_argument("--epochs", type=int, default=50, help="Number of training epochs")
     parser.add_argument("--batch-size", type=int, default=128, help="Minibatch size")
@@ -23,6 +39,7 @@ def main() -> None:
     parser.add_argument("--num-keypoints", type=int, default=32, help="Number of 2D Spatial Softmax keypoints per camera")
     parser.add_argument("--vision-feat-dim", type=int, default=64, help="Visual feature projection dimension per camera")
     parser.add_argument("--hidden-dim", type=int, default=256, help="Hidden dimension of ResMLP backbone")
+    parser.add_argument("--num-blocks", type=int, default=4, help="Number of ResMLP blocks (state mode)")
     parser.add_argument("--dropout", type=float, default=0.0, help="Dropout probability in obs_proj and ResMLP blocks")
     parser.add_argument("--keypoint-noise", type=float, default=0.0, help="Gaussian noise std injected into 2D keypoints during training")
     parser.add_argument("--gripper-weight", type=float, default=2.5, help="Gripper loss dimension weight")
@@ -52,32 +69,46 @@ def main() -> None:
     parser.add_argument("--device", type=str, default="auto", help="Compute device: auto, cpu, cuda, or mps")
     args = parser.parse_args()
 
-    train_vision_policy(
-        data_path=args.data,
-        save_dir=args.save_dir,
-        epochs=args.epochs,
-        batch_size=args.batch_size,
-        lr=args.lr,
-        horizon=args.horizon,
-        num_keypoints=args.num_keypoints,
-        vision_feat_dim=args.vision_feat_dim,
-        hidden_dim=args.hidden_dim,
-        dropout=args.dropout,
-        keypoint_noise=args.keypoint_noise,
-        gripper_weight=args.gripper_weight,
-        shift_aug=args.shift_aug,
-        use_cross_attention=args.use_cross_attention,
-        camera_dropout=args.camera_dropout,
-        dropout_cameras=tuple(args.dropout_cameras),
-        use_aux_pose=args.use_aux_pose,
-        aux_pose_weight=args.aux_pose_weight,
-        use_progress=not args.no_progress,
-        proprio_history_lags=tuple(args.proprio_history_lags),
-        trim_stationary=args.trim_stationary,
-        action_space=args.action_space,
-        device_str=args.device,
-        cameras=tuple(args.cameras) if args.cameras is not None else None,
-    )
+    if args.state:
+        train_policy(
+            data_path=args.data,
+            save_dir=args.save_dir,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            lr=args.lr,
+            horizon=args.horizon,
+            hidden_dim=args.hidden_dim,
+            num_blocks=args.num_blocks,
+            gripper_weight=args.gripper_weight,
+            device_str=args.device,
+        )
+    else:
+        train_vision_policy(
+            data_path=args.data,
+            save_dir=args.save_dir,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            lr=args.lr,
+            horizon=args.horizon,
+            num_keypoints=args.num_keypoints,
+            vision_feat_dim=args.vision_feat_dim,
+            hidden_dim=args.hidden_dim,
+            dropout=args.dropout,
+            keypoint_noise=args.keypoint_noise,
+            gripper_weight=args.gripper_weight,
+            shift_aug=args.shift_aug,
+            use_cross_attention=args.use_cross_attention,
+            camera_dropout=args.camera_dropout,
+            dropout_cameras=tuple(args.dropout_cameras),
+            use_aux_pose=args.use_aux_pose,
+            aux_pose_weight=args.aux_pose_weight,
+            use_progress=not args.no_progress,
+            proprio_history_lags=tuple(args.proprio_history_lags),
+            trim_stationary=args.trim_stationary,
+            action_space=args.action_space,
+            device_str=args.device,
+            cameras=tuple(args.cameras) if args.cameras is not None else None,
+        )
 
 
 if __name__ == "__main__":

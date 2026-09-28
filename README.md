@@ -38,11 +38,13 @@ floraflow/
 │   ├── common/                 # Shared Simulation & Kinematics Foundation
 │   │   ├── env.py              # DeskWateringEnv (MuJoCo 20 Hz simulation & collision guards)
 │   │   └── kinematics.py       # DLS 7-DoF Inverse Kinematics & 6D SO(3) rotation utilities
-│   ├── collection/             # Pillar 1: Data Collection Pipeline
+│   ├── collection/             # Pillar 1: Data Collection Pipeline (`python -m floraflow.collection`)
+│   │   ├── __main__.py         # Self-contained CLI entrypoint (`floraflow-collect`)
 │   │   ├── trajectory.py       # Minimum-jerk quintic polynomial interpolator
 │   │   ├── pour_planner.py     # Deterministic 9-phase pick, lift, transport, and pour planner
 │   │   └── collector.py        # State and multi-camera HDF5 demonstration collectors
-│   ├── training/               # Pillar 2: Training Pipeline
+│   ├── training/               # Pillar 2: Training Pipeline (`python -m floraflow.training`)
+│   │   ├── __main__.py         # Self-contained CLI entrypoint (`floraflow-train`)
 │   │   ├── dataset.py          # State and multi-camera HDF5 dataset loaders (GPU uint8 batching)
 │   │   ├── augmentation.py     # RandomShifter GPU spatial shift augmentation
 │   │   ├── spatial_softmax.py  # Differentiable Spatial Softmax 2D keypoint extraction layer
@@ -50,24 +52,14 @@ floraflow/
 │   │   ├── model.py            # FlowMatchingPolicy network (state-based)
 │   │   ├── vision_model.py     # VisionFlowMatchingPolicy (multi-camera CNN + cross-attention)
 │   │   └── trainer.py          # Accelerated training loops for state and vision policies
-│   └── evaluation/             # Pillar 3: Evaluation & Telemetry Pipeline
+│   └── evaluation/             # Pillar 3: Evaluation & Telemetry Pipeline (`python -m floraflow.evaluation`)
+│       ├── __main__.py         # Self-contained CLI entrypoint (`floraflow-eval`)
 │       ├── evaluator.py        # State policy closed-loop evaluator and OOD spawn generator
 │       ├── vision_evaluator.py # Pixel-to-Action closed-loop evaluator with temporal ensembling
-│       └── visualizer.py       # 4-layer VLA telemetry compositor (keypoints, 3D FK ribbon, HUD)
-├── scripts/
-│   ├── collect_demos.py        # Clean CLI entrypoint for multi-camera data collection
-│   ├── train.py                # Clean CLI entrypoint for vision policy training
-│   ├── evaluate.py             # Clean CLI entrypoint for closed-loop vision evaluation
-│   ├── visualize.py            # Clean CLI entrypoint for 4-layer VLA rollout visualization
-│   ├── 01_generate_demos.py    # State expert demonstration CLI wrapper
-│   ├── 01b_generate_vision_demos.py # Multi-camera visual demonstration CLI wrapper
-│   ├── 02_train_policy.py      # State Flow Matching training CLI wrapper
-│   ├── 02b_train_vision_policy.py   # Vision Flow Matching training CLI wrapper
-│   ├── 03_evaluate_policy.py   # State policy evaluation CLI wrapper
-│   ├── 03b_evaluate_vision_policy.py # Vision policy evaluation CLI wrapper
-│   └── 04_visualize_vision_rollout.py # 4-layer VLA telemetry GIF CLI wrapper
+│       ├── visualizer.py       # 4-layer VLA telemetry compositor (keypoints, 3D FK ribbon, HUD)
+│       └── visualize.py        # CLI runner for 4-layer VLA rollout GIFs (`floraflow-visualize`)
 ├── tests/                      # Pytest suite covering common, collection, training, and evaluation
-└── pyproject.toml              # Dependencies and build configuration
+└── pyproject.toml              # Dependencies and CLI entrypoints
 ```
 
 ## 3. Quick Start
@@ -86,19 +78,19 @@ uv pip install -e .
 1. **Collect Demonstrations**:
    Generate 500 expert demonstrations across widened workspace bounds ($87,000$ state-action transitions):
    ```bash
-   uv run scripts/01_generate_demos.py --num-demos 500 --output data/watering_demos_widened_500.h5 --widened-bounds
+   uv run python -m floraflow.collection --state --num-demos 500 --output datasets/watering_demos_widened_500.h5 --widened-bounds
    ```
 
 2. **Train Flow Matching Policy**:
    Train the 840K-parameter vector field policy head on Apple Silicon MPS or CUDA GPU:
    ```bash
-   uv run scripts/02_train_policy.py --data-path data/watering_demos_widened_500.h5 --epochs 80
+   uv run python -m floraflow.training --state --data datasets/watering_demos_widened_500.h5 --epochs 80
    ```
 
 3. **Evaluate Closed-Loop Policy**:
    Benchmark closed-loop execution with continuous Temporal Ensembling across in-distribution and Hard out-of-distribution scenarios:
    ```bash
-   uv run scripts/03_evaluate_policy.py --mode both --difficulty hard --num-episodes 50
+   uv run python -m floraflow.evaluation --state --mode both --ood-difficulty hard --episodes 50
    ```
 
 ### Phase 2: Pixel-to-Action Vision Policy (Raw Camera Pixels)
@@ -106,25 +98,25 @@ uv pip install -e .
 1. **Collect Multi-Camera Demonstrations**:
    Generate 300 collision-free synchronized demonstration episodes ($52,200$ steps) recording tri-view $128 \times 128$ RGB camera streams (`third_person_cam`, `overhead_cam`, and eye-in-hand `wrist_cam`) alongside robot proprioception:
    ```bash
-   uv run scripts/01b_generate_vision_demos.py --num-demos 300 --output data/watering_demos_vision_3cam_300.h5
+   uv run python -m floraflow.collection --num-demos 300 --output datasets/watering_demos_vision_3cam_300.h5
    ```
 
 2. **Train Vision Flow Matching Policy**:
    Train the 1.09M-parameter `VisionFlowMatchingPolicy` (supports `--action-space {joint_abs,joint_delta,eef_se3}`):
    ```bash
-   uv run scripts/02b_train_vision_policy.py --data data/watering_demos_vision_3cam_300.h5 --save-dir checkpoints/run15c_clock_free_trimmed8d --num-keypoints 16 --vision-feat-dim 32 --shift-aug 0 --epochs 40 --batch-size 128 --use-cross-attention --no-progress --trim-stationary --action-space joint_abs
+   uv run python -m floraflow.training --data datasets/watering_demos_vision_3cam_300.h5 --save-dir checkpoints/run15c_clock_free_trimmed8d --num-keypoints 16 --vision-feat-dim 32 --shift-aug 0 --epochs 40 --batch-size 128 --use-cross-attention --no-progress --trim-stationary --action-space joint_abs
    ```
 
 3. **Evaluate Closed-Loop Vision Policy**:
    Benchmark closed-loop execution strictly from raw camera pixels and physical proprioception without simulator coordinates or a synthetic clock:
    ```bash
-   uv run scripts/03b_evaluate_vision_policy.py --checkpoint checkpoints/run15c_clock_free_trimmed8d/best_vision_policy.pt --mode both --ood-difficulty hard --episodes 20
+   uv run python -m floraflow.evaluation --checkpoint checkpoints/run15c_clock_free_trimmed8d/best_vision_policy.pt --mode both --ood-difficulty hard --episodes 20
    ```
 
 4. **Visualize 4-Layer VLA Telemetry & Spatial Keypoints**:
    Render synchronized 3-camera rollout GIFs and 6-phase keyframe contact sheets showing live 2D Spatial Softmax keypoints, 3D projected future action chunk ribbons, multi-camera cross-attention weights, and physical task telemetry:
    ```bash
-   uv run scripts/04_visualize_vision_rollout.py --checkpoint checkpoints/run15c_clock_free_trimmed8d/best_vision_policy.pt --mode id --seed 102 --output assets/media/vla_telemetry_showcase.gif
+   uv run python -m floraflow.evaluation.visualize --checkpoint checkpoints/run15c_clock_free_trimmed8d/best_vision_policy.pt --mode id --seed 102 --output assets/media/vla_telemetry_showcase.gif
    ```
 
 ### Run Test Suite
@@ -195,10 +187,10 @@ Full ablation details, failure-mode forensics, and step-by-step experimental der
   <img src="assets/media/vla_telemetry_showcase_strip.png" width="98%" alt="6-Phase VLA Telemetry Contact Sheet"/>
 </p>
 
-The [`VisionRolloutVisualizer`](floraflow/eval/visualizer.py) composites four internal decision layers at 20 Hz across `third_person_cam`, `overhead_cam`, and `wrist_cam`:
-1. **HUD Crosshairs (`+`)**: Top-8 highest-confidence [`SpatialSoftmax`](floraflow/policy/spatial_softmax.py) 2D keypoints ($\tau_{\text{viz}} = 0.08$) locking directly onto the plant leaves, watering can body, handle, and robot wrist.
+The [`VisionRolloutVisualizer`](floraflow/evaluation/visualizer.py) composites four internal decision layers at 20 Hz across `third_person_cam`, `overhead_cam`, and `wrist_cam`:
+1. **HUD Crosshairs (`+`)**: Top-8 highest-confidence [`SpatialSoftmax`](floraflow/training/spatial_softmax.py) 2D keypoints ($\tau_{\text{viz}} = 0.08$) locking directly onto the plant leaves, watering can body, handle, and robot wrist.
 2. **3D Future Action Chunk Ribbon (Cyan to Amber)**: 16-step ($0.8\text{ s}$) predicted future fingertip trajectory computed via isolated MuJoCo forward kinematics (`mj_kinematics`) and projected into each camera's 2D pixel frame.
-3. **Emergent Camera Cross-Attention Switching**: Live modality weights from [`MultiCameraCrossAttention`](floraflow/policy/vision_model.py) reveal automatic phase-dependent camera selection:
+3. **Emergent Camera Cross-Attention Switching**: Live modality weights from [`MultiCameraCrossAttention`](floraflow/training/vision_model.py) reveal automatic phase-dependent camera selection:
    * **Approach (Step 1)**: `overhead_cam` dominates (`62.5%`) to triangulate global $(X, Y)$ tabletop coordinates.
    * **Millimeter Grasp (Step 39)**: `wrist_cam` spikes (`41.3%` on ID Seed 102, `51.8%` on Hard OOD Seed 204) as the fingers close around the `8 mm` handle.
    * **Pouring (Steps 116 to 196)**: When the tilted watering can occludes `wrist_cam`, attention shifts back to `third_person_cam` and `overhead_cam` (`85%` to `97%` combined) to hold the spout at `5.3 to 8.0 cm` over the pot rim.

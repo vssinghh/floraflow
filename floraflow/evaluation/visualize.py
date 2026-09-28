@@ -1,12 +1,4 @@
-"""Generate 4-Layer Multi-Camera VLA Telemetry & Keypoint Rollout Visualizations.
-
-Renders closed-loop episodes from raw pixels and exports animated GIF dashboards
-and 6-frame progression contact sheets showing:
-1. 2D Spatial Softmax keypoints and confidence-weighted motion trails across all 3 cameras.
-2. 3D Forward-Kinematics 16-step future action chunk trajectory ribbons.
-3. Multi-Camera Cross-Attention live modality weights and time-series traces.
-4. Physical task telemetry (Spout-to-Pot distance, Can Tilt angle, Gripper state, Water particles).
-"""
+"""CLI Entrypoint for 4-Layer Multi-Camera VLA Telemetry Rollout Visualization (`python -m floraflow.evaluation.visualize`)."""
 
 from __future__ import annotations
 
@@ -28,7 +20,6 @@ def _resolve_spawn_coords(
     if mode == "id":
         return None, None
 
-    # Match generate_ood_configurations(base_seed=200) indexing when seed >= 200
     offset = max(0, seed - 200)
     num_needed = offset + 1
     _, can_xys, plant_xys = generate_ood_configurations(
@@ -49,7 +40,10 @@ def _default_label(ckpt_path: str) -> str:
 
 
 def main() -> None:
-    parser = argparse.ArgumentParser(description="Visualize VLA Multi-Camera Keypoint & Telemetry Rollouts")
+    parser = argparse.ArgumentParser(
+        prog="python -m floraflow.evaluation.visualize",
+        description="Visualize VLA Multi-Camera Keypoint & Telemetry Rollouts",
+    )
     parser.add_argument(
         "--checkpoint",
         type=str,
