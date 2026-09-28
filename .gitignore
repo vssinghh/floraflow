@@ -34,8 +34,11 @@ venv/
 htmlcov/
 
 # Data artifacts and models (large binaries)
+/data
 data/*.h5
 data/*.hdf5
+datasets/*.h5
+datasets/*.hdf5
 checkpoints/*.pt
 checkpoints/*.pth
 checkpoints/**/*.pt

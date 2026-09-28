@@ -9,9 +9,9 @@ from __future__ import annotations
 from typing import Any, Dict, List, Tuple
 import numpy as np
 
-from floraflow.env.desk_env import DeskWateringEnv
-from floraflow.expert.ik_solver import IKSolver
-from floraflow.expert.trajectory import interpolate_joint_trajectory
+from floraflow.common.env import DeskWateringEnv
+from floraflow.common.kinematics import IKSolver
+from floraflow.collection.trajectory import interpolate_joint_trajectory
 
 
 class PourExpertPlanner:

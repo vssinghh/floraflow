@@ -15,7 +15,7 @@ It includes both a **State-Based Policy** (operating on ground-truth 3D object c
 | **Simulation & Physics** | MuJoCo 3.x, 7-DoF Franka Emika Panda arm + parallel-jaw gripper, `500 Hz` physics (`dt = 2 ms`, 25 substeps), `20 Hz` policy control |
 | **Visual Observation (`Phase 2`)** | 3 synchronized $128 \times 128$ RGB cameras: `third_person_cam`, `overhead_cam`, and wrist-mounted `wrist_cam` |
 | **Proprioception (`8D` / `10D`)** | Clock-free `8D` joint state (`7D qpos + 1D grip`) or embodiment-agnostic `10D` fingertip `SE(3)` pose (`3D pos + 6D rot6d + 1D grip`) |
-| **Vision Backbone** | Per-camera 4-layer ConvNet + [`SpatialSoftmax`](floraflow/policy/spatial_softmax.py) (`16` 2D keypoints, `32`-dim projection) + 4-head [`MultiCameraCrossAttention`](floraflow/policy/vision_model.py) (`192`-dim fused bottleneck) |
+| **Vision Backbone** | Per-camera 4-layer ConvNet + [`SpatialSoftmax`](floraflow/training/spatial_softmax.py) (`16` 2D keypoints, `32`-dim projection) + 4-head [`MultiCameraCrossAttention`](floraflow/training/vision_model.py) (`192`-dim fused bottleneck) |
 | **Policy & ODE Solver** | Conditional Flow Matching ResMLP (`1.09M` params), 10-step Euler ODE (`~5.2 ms` on MPS), sliding-window Temporal Ensembling ($w_h = \exp(-0.05 h)$) |
 | **Action Chunk (`16 x 8` / `16 x 10`)** | 16-step horizon ($0.8\text{ s}$): `joint_abs` (`8D`), `joint_delta` (`8D`), or 6-DoF/7-DoF hardware-agnostic `eef_se3` (`10D`: `3D pos + 6D rot6d + 1D grip`) |
 | **Datasets** | **Vision**: 300 collision-validated demos ($52,200$ raw / $47,103$ active trimmed transitions) · **State**: 500 widened demos ($87,000$ transitions) |
@@ -28,39 +28,45 @@ floraflow/
 ├── assets/
 │   ├── franka_emika_panda/     # Franka arm & gripper MuJoCo models
 │   ├── media/                  # 4-layer VLA telemetry rollout GIFs and keyframe strips
+│   ├── debug/                  # Diagnostic camera inspection frames
 │   └── scenes/
 │       └── desk_scene.xml      # Tabletop scene: arm, plant, watering can, water particles
-├── checkpoints/                # Model weights, configs, and dataset normalization stats
-├── data/                       # HDF5 demonstration datasets
+├── datasets/                   # Actual Data: HDF5 demonstration archives (.h5)
+├── checkpoints/                # Trained Model Weights (.pt) and normalization stats (.json)
 ├── docs/                       # Optimization experiment log and architecture guides
 ├── floraflow/
-│   ├── env/
-│   │   └── desk_env.py         # MuJoCo simulation environment (20 Hz control, multi-camera rendering)
-│   ├── expert/
-│   │   ├── ik_solver.py        # DLS 7-DoF Inverse Kinematics with nullspace regularization
+│   ├── common/                 # Shared Simulation & Kinematics Foundation
+│   │   ├── env.py              # DeskWateringEnv (MuJoCo 20 Hz simulation & collision guards)
+│   │   └── kinematics.py       # DLS 7-DoF Inverse Kinematics & 6D SO(3) rotation utilities
+│   ├── collection/             # Pillar 1: Data Collection Pipeline
 │   │   ├── trajectory.py       # Minimum-jerk quintic polynomial interpolator
-│   │   └── pour_planner.py     # Deterministic 9-phase pick, lift, transport, and pour planner
-│   ├── policy/
-│   │   ├── model.py            # FlowMatchingPolicy network (state-based)
+│   │   ├── pour_planner.py     # Deterministic 9-phase pick, lift, transport, and pour planner
+│   │   └── collector.py        # State and multi-camera HDF5 demonstration collectors
+│   ├── training/               # Pillar 2: Training Pipeline
+│   │   ├── dataset.py          # State and multi-camera HDF5 dataset loaders (GPU uint8 batching)
+│   │   ├── augmentation.py     # RandomShifter GPU spatial shift augmentation
 │   │   ├── spatial_softmax.py  # Differentiable Spatial Softmax 2D keypoint extraction layer
-│   │   ├── vision_model.py     # VisionFlowMatchingPolicy (multi-camera CNN + proprioception fusion)
-│   │   └── flow_matching.py    # Optimal Transport CFM vector field head & Euler integrator
-│   ├── data/
-│   │   ├── dataset.py          # State-based HDF5 dataset loader and normalizer
-│   │   └── vision_dataset.py   # Multi-camera HDF5 dataset loader with in-memory caching
-│   └── eval/
-│       ├── evaluator.py        # State policy closed-loop evaluator and scorecard utilities
+│   │   ├── flow_matching.py    # Optimal Transport CFM vector field head & Euler integrator
+│   │   ├── model.py            # FlowMatchingPolicy network (state-based)
+│   │   ├── vision_model.py     # VisionFlowMatchingPolicy (multi-camera CNN + cross-attention)
+│   │   └── trainer.py          # Accelerated training loops for state and vision policies
+│   └── evaluation/             # Pillar 3: Evaluation & Telemetry Pipeline
+│       ├── evaluator.py        # State policy closed-loop evaluator and OOD spawn generator
 │       ├── vision_evaluator.py # Pixel-to-Action closed-loop evaluator with temporal ensembling
 │       └── visualizer.py       # 4-layer VLA telemetry compositor (keypoints, 3D FK ribbon, HUD)
 ├── scripts/
-│   ├── 01_generate_demos.py    # Generates state expert demonstrations
-│   ├── 01b_generate_vision_demos.py # Generates multi-camera visual demonstrations
-│   ├── 02_train_policy.py      # Trains state Flow Matching policy
-│   ├── 02b_train_vision_policy.py   # Trains Pixel-to-Action Flow Matching policy
-│   ├── 03_evaluate_policy.py   # Evaluates state policy on ID and OOD benchmarks
-│   ├── 03b_evaluate_vision_policy.py # Evaluates vision policy from raw camera pixels
-│   └── 04_visualize_vision_rollout.py # Exports 4-layer VLA telemetry GIFs & checkpoint comparisons
-├── tests/                      # Pytest suite covering physics, kinematics, vision, and visualizer
+│   ├── collect_demos.py        # Clean CLI entrypoint for multi-camera data collection
+│   ├── train.py                # Clean CLI entrypoint for vision policy training
+│   ├── evaluate.py             # Clean CLI entrypoint for closed-loop vision evaluation
+│   ├── visualize.py            # Clean CLI entrypoint for 4-layer VLA rollout visualization
+│   ├── 01_generate_demos.py    # State expert demonstration CLI wrapper
+│   ├── 01b_generate_vision_demos.py # Multi-camera visual demonstration CLI wrapper
+│   ├── 02_train_policy.py      # State Flow Matching training CLI wrapper
+│   ├── 02b_train_vision_policy.py   # Vision Flow Matching training CLI wrapper
+│   ├── 03_evaluate_policy.py   # State policy evaluation CLI wrapper
+│   ├── 03b_evaluate_vision_policy.py # Vision policy evaluation CLI wrapper
+│   └── 04_visualize_vision_rollout.py # 4-layer VLA telemetry GIF CLI wrapper
+├── tests/                      # Pytest suite covering common, collection, training, and evaluation
 └── pyproject.toml              # Dependencies and build configuration
 ```
 

@@ -10,8 +10,8 @@ import argparse
 from typing import List, Tuple
 import numpy as np
 
-from floraflow.eval.evaluator import BenchmarkScorecard, generate_ood_configurations, print_scorecard
-from floraflow.eval.vision_evaluator import VisionPolicyEvaluator
+from floraflow.evaluation.evaluator import BenchmarkScorecard, generate_ood_configurations, print_scorecard
+from floraflow.evaluation.vision_evaluator import VisionPolicyEvaluator
 
 
 def main() -> None:

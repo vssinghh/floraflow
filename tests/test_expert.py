@@ -5,9 +5,9 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from floraflow.env.desk_env import DeskWateringEnv
-from floraflow.expert.ik_solver import IKSolver
-from floraflow.expert.trajectory import interpolate_joint_trajectory, minimum_jerk_scaling
+from floraflow.collection.trajectory import interpolate_joint_trajectory, minimum_jerk_scaling
+from floraflow.common.env import DeskWateringEnv
+from floraflow.common.kinematics import IKSolver
 
 
 def test_minimum_jerk_boundary_conditions() -> None:

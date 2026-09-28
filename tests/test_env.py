@@ -5,7 +5,7 @@ from __future__ import annotations
 import numpy as np
 import pytest
 
-from floraflow.env.desk_env import DeskWateringEnv
+from floraflow.common.env import DeskWateringEnv
 
 
 def test_env_initialization() -> None:
@@ -87,7 +87,7 @@ def test_env_step_contract() -> None:
 
 def test_spawn_clearance_and_collision_validation() -> None:
     """Verify geometric spawn clearance rules and physics contact collision checks."""
-    from floraflow.eval.evaluator import generate_ood_configurations
+    from floraflow.evaluation.evaluator import generate_ood_configurations
 
     env = DeskWateringEnv()
 
@@ -130,11 +130,11 @@ def test_spawn_clearance_and_collision_validation() -> None:
 
 
 def test_stored_hdf5_datasets_clean_spawns() -> None:
-    """Verify that all HDF5 demonstration archives in data/ have valid clearance and unperturbed Step 0 grippers."""
+    """Verify that all HDF5 demonstration archives in datasets/ have valid clearance and unperturbed Step 0 grippers."""
     from pathlib import Path
     import h5py
 
-    data_dir = Path(__file__).resolve().parent.parent / "data"
+    data_dir = Path(__file__).resolve().parent.parent / "datasets"
     if not data_dir.exists():
         return
 

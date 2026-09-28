@@ -14,10 +14,10 @@ from typing import Any, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 
-from floraflow.data.dataset import extract_observation_vector
-from floraflow.env.desk_env import DeskWateringEnv
-from floraflow.policy.flow_matching import ConditionalFlowMatcher
-from floraflow.policy.model import FlowMatchingPolicy
+from floraflow.common.env import DeskWateringEnv
+from floraflow.training.dataset import extract_observation_vector
+from floraflow.training.flow_matching import ConditionalFlowMatcher
+from floraflow.training.model import FlowMatchingPolicy
 
 
 @dataclass

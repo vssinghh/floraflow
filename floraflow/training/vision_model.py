@@ -12,8 +12,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
-from floraflow.policy.model import ResMlpBlock, SinusoidalPosEmb
-from floraflow.policy.spatial_softmax import SpatialSoftmax
+from floraflow.training.model import ResMlpBlock, SinusoidalPosEmb
+from floraflow.training.spatial_softmax import SpatialSoftmax
 
 
 class SpatialSoftmaxConvNet(nn.Module):

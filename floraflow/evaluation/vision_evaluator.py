@@ -14,11 +14,11 @@ from typing import Any, Callable, Dict, List, Optional, Tuple
 import numpy as np
 import torch
 
-from floraflow.env.desk_env import DeskWateringEnv
-from floraflow.eval.evaluator import BenchmarkScorecard, EpisodeResult
-from floraflow.expert.ik_solver import IKSolver, rot6d_to_rotmat, rotmat_to_rot6d
-from floraflow.policy.flow_matching import ConditionalFlowMatcher
-from floraflow.policy.vision_model import VisionFlowMatchingPolicy
+from floraflow.common.env import DeskWateringEnv
+from floraflow.common.kinematics import IKSolver, rot6d_to_rotmat, rotmat_to_rot6d
+from floraflow.evaluation.evaluator import BenchmarkScorecard, EpisodeResult
+from floraflow.training.flow_matching import ConditionalFlowMatcher
+from floraflow.training.vision_model import VisionFlowMatchingPolicy
 
 
 class VisionPolicyEvaluator:

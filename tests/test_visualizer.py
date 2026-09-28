@@ -6,13 +6,13 @@ from pathlib import Path
 import numpy as np
 import torch
 
-from floraflow.env.desk_env import DeskWateringEnv
-from floraflow.eval.visualizer import (
+from floraflow.common.env import DeskWateringEnv
+from floraflow.evaluation.visualizer import (
     VisionRolloutVisualizer,
     project_3d_to_camera_pixels,
 )
-from floraflow.policy.spatial_softmax import SpatialSoftmax
-from floraflow.policy.vision_model import VisionFlowMatchingPolicy
+from floraflow.training.spatial_softmax import SpatialSoftmax
+from floraflow.training.vision_model import VisionFlowMatchingPolicy
 
 
 def test_spatial_softmax_forward_with_confidence() -> None:

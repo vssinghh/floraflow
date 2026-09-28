@@ -6,10 +6,10 @@ import numpy as np
 import pytest
 import torch
 
-from floraflow.data.dataset import extract_observation_vector
-from floraflow.env.desk_env import DeskWateringEnv
-from floraflow.policy.flow_matching import ConditionalFlowMatcher
-from floraflow.policy.model import FlowMatchingPolicy, SinusoidalPosEmb
+from floraflow.common.env import DeskWateringEnv
+from floraflow.training.dataset import extract_observation_vector
+from floraflow.training.flow_matching import ConditionalFlowMatcher
+from floraflow.training.model import FlowMatchingPolicy, SinusoidalPosEmb
 
 
 def test_sinusoidal_positional_embedding() -> None:

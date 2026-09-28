@@ -1,15 +1,8 @@
-"""CLI Entrypoint: Collect Multi-Camera Vision Expert Demonstrations.
-
-Delegates to floraflow.collection.collector.generate_vision_demonstrations.
-"""
+"""Clean CLI Entrypoint for Multi-Camera Vision Demonstration Collection."""
 
 from __future__ import annotations
-
-import argparse
-
 from floraflow.collection.collector import generate_vision_demonstrations
-
-__all__ = ["generate_vision_demonstrations", "main"]
+import argparse
 
 
 def main() -> None:

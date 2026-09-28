@@ -6,10 +6,9 @@ and an explicit Euler ODE numerical integrator for real-time inference.
 
 from __future__ import annotations
 
-from typing import Any, Dict, Optional, Tuple, Union
+from typing import Any, Dict, Tuple, Union
 import torch
 import torch.nn as nn
-import torch.nn.functional as F
 
 
 class ConditionalFlowMatcher:
@@ -23,18 +22,21 @@ class ConditionalFlowMatcher:
         self,
         model: nn.Module,
         x1: torch.Tensor,
-        obs: torch.Tensor,
-    ) -> Tuple[torch.Tensor, Dict[str, float]]:
+        obs: Union[torch.Tensor, Dict[str, torch.Tensor]],
+        async_metrics: bool = False,
+    ) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """Compute CFM vector field regression loss.
 
         Args:
             model: Policy neural network predicting vector field velocity.
             x1: Ground truth target action chunk (B, H, act_dim).
-            obs: Observation feature conditioning tensor (B, obs_dim).
+            obs: Observation feature conditioning tensor or dict of tensors.
+            async_metrics: If True, returns detached GPU scalar tensors in metrics
+                instead of calling .item() mid-batch, avoiding GPU/TPU pipeline stalls.
 
         Returns:
             loss: Scalar MSE tensor.
-            metrics: Dictionary of diagnostic metric values.
+            metrics: Dictionary of diagnostic metric values (floats or detached scalar tensors).
         """
         b = x1.shape[0]
         device = x1.device
@@ -58,17 +60,28 @@ class ConditionalFlowMatcher:
         v_pred = model(x_t, t, obs)
 
         # Weighted mean squared error (arm pose: 1.0, gripper final dim: gripper_weight)
-        sq_err = (v_pred - u_t) ** 2
+        sq_err = (v_pred.float() - u_t.float()) ** 2
         weights = torch.ones(x1.shape[-1], device=device, dtype=torch.float32)
         if weights.shape[0] >= 8:
             weights[-1] = self.gripper_weight
         loss = (sq_err * weights).mean()
 
-        metrics = {
-            "loss": float(loss.detach().item()),
-            "v_norm": float(v_pred.detach().norm(dim=-1).mean().item()),
-            "u_norm": float(u_t.detach().norm(dim=-1).mean().item()),
-        }
+        loss_det = loss.detach()
+        v_norm_det = v_pred.detach().float().norm(dim=-1).mean()
+        u_norm_det = u_t.detach().float().norm(dim=-1).mean()
+
+        if async_metrics:
+            metrics: Dict[str, Any] = {
+                "loss": loss_det,
+                "v_norm": v_norm_det,
+                "u_norm": u_norm_det,
+            }
+        else:
+            metrics = {
+                "loss": float(loss_det.item()),
+                "v_norm": float(v_norm_det.item()),
+                "u_norm": float(u_norm_det.item()),
+            }
         return loss, metrics
 
     @torch.no_grad()

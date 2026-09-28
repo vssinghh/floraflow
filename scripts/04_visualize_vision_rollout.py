@@ -14,9 +14,9 @@ import argparse
 from pathlib import Path
 from typing import Optional, Tuple
 
-from floraflow.eval.evaluator import generate_ood_configurations
-from floraflow.eval.vision_evaluator import VisionPolicyEvaluator
-from floraflow.eval.visualizer import VisionRolloutVisualizer, save_comparison_gif
+from floraflow.evaluation.evaluator import generate_ood_configurations
+from floraflow.evaluation.vision_evaluator import VisionPolicyEvaluator
+from floraflow.evaluation.visualizer import VisionRolloutVisualizer, save_comparison_gif
 
 
 def _resolve_spawn_coords(

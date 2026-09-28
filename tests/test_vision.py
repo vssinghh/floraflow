@@ -10,10 +10,10 @@ import numpy as np
 import pytest
 import torch
 
-from floraflow.data.vision_dataset import VisionWateringDataset
-from floraflow.policy.flow_matching import ConditionalFlowMatcher
-from floraflow.policy.spatial_softmax import SpatialSoftmax
-from floraflow.policy.vision_model import SpatialSoftmaxConvNet, VisionFlowMatchingPolicy
+from floraflow.training.dataset import VisionWateringDataset
+from floraflow.training.flow_matching import ConditionalFlowMatcher
+from floraflow.training.spatial_softmax import SpatialSoftmax
+from floraflow.training.vision_model import SpatialSoftmaxConvNet, VisionFlowMatchingPolicy
 
 
 def test_spatial_softmax_output_shape_and_coords() -> None:
@@ -97,7 +97,7 @@ def test_vision_dataset_loading() -> None:
 
 def test_random_shifter_preserves_shape() -> None:
     """Test that RandomShifter preserves tensor dimensions and shifts pixels."""
-    from floraflow.data.augmentation import RandomShifter
+    from floraflow.training.augmentation import RandomShifter
     shifter = RandomShifter(max_shift=4)
     x = torch.rand(4, 3, 128, 128)
     out = shifter(x)
@@ -109,7 +109,7 @@ def test_random_shifter_preserves_shape() -> None:
 
 def test_tri_camera_vision_policy_and_env() -> None:
     """Test policy and environment with 3 cameras including wrist_cam."""
-    from floraflow.env.desk_env import DeskWateringEnv
+    from floraflow.common.env import DeskWateringEnv
     cameras = ("third_person_cam", "overhead_cam", "wrist_cam")
 
     # Verify environment produces all three camera views
@@ -449,7 +449,7 @@ def test_vision_dataset_joint_delta_roundtrip() -> None:
 
 def test_vision_dataset_eef_se3_and_rot6d() -> None:
     """Test that action_space='eef_se3' yields 10D task-space proprioception and 10D SE(3) action chunks."""
-    from floraflow.expert.ik_solver import rot6d_to_rotmat, rotmat_to_rot6d
+    from floraflow.common.kinematics import rot6d_to_rotmat, rotmat_to_rot6d
 
     # 1. Verify rotmat -> rot6d -> rotmat round-trip on a 50-deg Y-pitch rotation
     theta = np.radians(-50.0)
@@ -482,5 +482,61 @@ def test_vision_dataset_eef_se3_and_rot6d() -> None:
         obs_0, act_0 = ds_se3[0]
         assert obs_0["proprio"].shape == (10,)
         assert act_0.shape == (4, 10)
+
+
+def test_modular_architecture_and_gpu_batch_optimizations() -> None:
+    """Test 4-pillar package imports, return_uint8_images=True batching, and async_metrics=True."""
+    from floraflow.common import DeskWateringEnv, IKSolver
+    from floraflow.collection import PourExpertPlanner, generate_vision_demonstrations
+    from floraflow.training import (
+        ConditionalFlowMatcher,
+        VisionFlowMatchingPolicy,
+        VisionWateringDataset,
+        train_vision_policy,
+    )
+    from floraflow.evaluation import VisionPolicyEvaluator, VisionRolloutVisualizer
+
+    assert DeskWateringEnv is not None and IKSolver is not None
+    assert PourExpertPlanner is not None and callable(generate_vision_demonstrations)
+    assert VisionPolicyEvaluator is not None and VisionRolloutVisualizer is not None
+    assert callable(train_vision_policy)
+
+    rng = np.random.default_rng(99)
+    with tempfile.NamedTemporaryFile(suffix=".h5") as tmp:
+        imgs = rng.integers(0, 256, size=(8, 128, 128, 3), dtype=np.uint8)
+        qpos = rng.normal(0.0, 0.2, size=(8, 7)).astype(np.float32)
+        grip = np.ones((8, 1), dtype=np.float32) * 0.04
+        actions = np.concatenate([qpos, np.ones((8, 1), dtype=np.float32)], axis=-1)
+        with h5py.File(tmp.name, "w") as f:
+            grp = f.create_group("data/demo_0")
+            obs_grp = grp.create_group("obs")
+            obs_grp.create_dataset("rgb_third_person_cam", data=imgs)
+            obs_grp.create_dataset("rgb_overhead_cam", data=imgs)
+            obs_grp.create_dataset("arm_qpos", data=qpos)
+            obs_grp.create_dataset("gripper_width", data=grip)
+            grp.create_dataset("actions", data=actions)
+
+        ds_f32 = VisionWateringDataset(h5_path=tmp.name, horizon=4, return_uint8_images=False)
+        ds_u8 = VisionWateringDataset(h5_path=tmp.name, horizon=4, return_uint8_images=True)
+
+        obs_f32, _ = ds_f32[0]
+        obs_u8, act_u8 = ds_u8[0]
+        assert obs_u8["rgb_third_person_cam"].dtype == torch.uint8
+        assert obs_u8["rgb_third_person_cam"].shape == (128, 128, 3)
+
+        converted = obs_u8["rgb_third_person_cam"].unsqueeze(0).permute(0, 3, 1, 2).float().div_(255.0).squeeze(0)
+        assert torch.allclose(converted, obs_f32["rgb_third_person_cam"], atol=1e-6)
+
+        model = VisionFlowMatchingPolicy(act_dim=8, horizon=4, proprio_dim=ds_u8.proprio_dim, num_keypoints=8, vision_feat_dim=16, hidden_dim=32, num_blocks=1)
+        cfm = ConditionalFlowMatcher()
+        batch_obs = {
+            "rgb_third_person_cam": converted.unsqueeze(0),
+            "rgb_overhead_cam": converted.unsqueeze(0),
+            "proprio": obs_u8["proprio"].unsqueeze(0),
+        }
+        loss, metrics = cfm.compute_loss(model, act_u8.unsqueeze(0), batch_obs, async_metrics=True)
+        assert isinstance(metrics["loss"], torch.Tensor)
+        assert metrics["loss"].ndim == 0
+        assert not metrics["loss"].requires_grad
 
 
