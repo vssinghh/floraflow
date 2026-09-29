@@ -1,6 +1,7 @@
 """Training Pipeline for FloraFlow."""
 
 from floraflow.training.augmentation import RandomShifter
+from floraflow.training.config import VisionTrainConfig
 from floraflow.training.dataset import (
     OBS_BASE_KEYS,
     TOTAL_DEMO_HORIZON,
@@ -30,6 +31,7 @@ __all__ = [
     "SpatialSoftmaxConvNet",
     "TOTAL_DEMO_HORIZON",
     "VisionFlowMatchingPolicy",
+    "VisionTrainConfig",
     "VisionWateringDataset",
     "WateringDemonstrationDataset",
     "extract_observation_vector",

@@ -45,6 +45,7 @@ floraflow/
 │   │   └── collector.py        # State and multi-camera HDF5 demonstration collectors
 │   ├── training/               # Pillar 2: Training Pipeline (`python -m floraflow.training`)
 │   │   ├── __main__.py         # Self-contained CLI entrypoint (`floraflow-train`)
+│   │   ├── config.py           # Frozen VisionTrainConfig single-source-of-truth hyperparameter schema
 │   │   ├── dataset.py          # State and multi-camera HDF5 dataset loaders (GPU uint8 batching)
 │   │   ├── augmentation.py     # RandomShifter GPU spatial shift augmentation
 │   │   ├── spatial_softmax.py  # Differentiable Spatial Softmax 2D keypoint extraction layer
@@ -95,22 +96,32 @@ uv pip install -e .
 
 ### Phase 2: Pixel-to-Action Vision Policy (Raw Camera Pixels)
 
-1. **Collect Multi-Camera Demonstrations**:
-   Generate 300 collision-free synchronized demonstration episodes ($52,200$ steps) recording tri-view $128 \times 128$ RGB camera streams (`third_person_cam`, `overhead_cam`, and eye-in-hand `wrist_cam`) alongside robot proprioception:
+1. **Collect Multi-Camera Demonstrations (Clean Studio & Sim-to-Real Domain Randomized)**:
+   Generate 300 collision-free clean demonstrations ($52,200$ steps) plus 300 Sim-to-Real domain-randomized demonstrations (`--domain-rand`, randomizing 3D lighting, shadows, white balance, object/table RGB colors, $\pm 1.2\text{ cm}$ camera mount extrinsics, $0.7\times\text{ to }2.0\times$ watering can mass/inertia, and 7-DoF joint damping):
    ```bash
    uv run python -m floraflow.collection --num-demos 300 --output datasets/watering_demos_vision_3cam_300.h5
+   uv run python -m floraflow.collection --num-demos 300 --start-seed 300 --domain-rand --output datasets/watering_demos_vision_3cam_dr_300.h5
    ```
 
 2. **Train Vision Flow Matching Policy**:
-   Train the 1.09M-parameter `VisionFlowMatchingPolicy` (supports `--action-space {joint_abs,joint_delta,eef_se3}`):
+   All architectural and optimization defaults (`8D` clock-free proprioception, `8D` joint action chunks, stationary frame trimming, `vision_feat_dim=32`, `num_keypoints=32`, 4-head multi-camera cross-attention, and `K=4` stratified flow amortization over `20` epochs) are locked in the frozen [`VisionTrainConfig`](floraflow/training/config.py) schema and automatically saved to `<save_dir>/train_config.json`:
    ```bash
-   uv run python -m floraflow.training --data datasets/watering_demos_vision_3cam_300.h5 --save-dir checkpoints/run15c_clock_free_trimmed8d --num-keypoints 16 --vision-feat-dim 32 --shift-aug 0 --epochs 40 --batch-size 128 --use-cross-attention --no-progress --trim-stationary --action-space joint_abs
+   # Clean Studio Specialist (300 Clean episodes)
+   uv run python -m floraflow.training \
+     --data datasets/watering_demos_vision_3cam_300.h5 \
+     --save-dir checkpoints/run15c_clock_free_trimmed8d
+
+   # Sim-to-Real Generalist (600 episodes: 300 Clean + 300 Domain-Randomized)
+   uv run python -m floraflow.training \
+     --data datasets/watering_demos_vision_3cam_300.h5 datasets/watering_demos_vision_3cam_dr_300.h5 \
+     --save-dir checkpoints/run17c_sim2real_dr_600_k4
    ```
 
-3. **Evaluate Closed-Loop Vision Policy**:
-   Benchmark closed-loop execution strictly from raw camera pixels and physical proprioception without simulator coordinates or a synthetic clock:
+3. **Evaluate Closed-Loop Vision Policy Across the 4-Split Sim-to-Real Benchmark**:
+   Benchmark closed-loop execution strictly from raw camera pixels and physical proprioception across all 4 saved splits (`clean_id`, `clean_ood`, `dr_id`, `dr_ood` in `datasets/eval_sim2real_benchmark.json`, `140` episodes total):
    ```bash
    uv run python -m floraflow.evaluation --checkpoint checkpoints/run15c_clock_free_trimmed8d/best_vision_policy.pt --mode both --ood-difficulty hard --episodes 20
+   uv run python -m floraflow.evaluation --checkpoint checkpoints/run17c_sim2real_dr_600_k4/best_vision_policy.pt --mode all
    ```
 
 4. **Visualize 4-Layer VLA Telemetry & Spatial Keypoints**:
@@ -160,7 +171,7 @@ Closed-loop evaluation benchmarks conducted across held-out in-distribution tria
 
 #### Vision Optimization Progression
 
-Full ablation details, failure-mode forensics, and step-by-step experimental derivations across all 16 runs are documented in [`docs/optimization_experiment_log.md`](docs/optimization_experiment_log.md).
+Full ablation details, failure-mode forensics, and step-by-step experimental derivations across all 17 runs are documented in [`docs/optimization_experiment_log.md`](docs/optimization_experiment_log.md).
 
 | Iteration | Configuration | In-Distribution (20 Seeds) | Hard Out-of-Distribution (50 Seeds) | Spout Error (ID / OOD) | Mean Latency |
 | :--- | :--- | :--- | :--- | :--- | :--- |
@@ -177,9 +188,12 @@ Full ablation details, failure-mode forensics, and step-by-step experimental der
 | **Run 14** | 300 Clean Demos + Run 12 Config + Restored LR (`lr=5e-4`, `9D` w/ Clock) | **100.0%** (20 / 20) | **90.0%** (45 / 50 on Clean Hard) | **8.1 cm** / 13.3 cm | 5.47 ms |
 | **Run 15a** | Run 14 Config + Clock-Free Single-Frame Proprioception (`8D` Raw, Untrimmed) | 35.0% (7 / 20) | - | 28.5 cm / - | 5.23 ms |
 | **Run 15b** | Run 14 Config + Clock-Free 4-Tap Proprioceptive History (`32D`, `lags=0,4,8,16`) | 90.0% (18 / 20) | 78.0% (39 / 50 on Clean Hard) | 9.9 cm / 15.4 cm | 5.30 ms |
-| **Run 15c (Unified Champion)** | Run 14 Config + Clock-Free `8D` Proprioception + Stationary Dwell Trimming (`joint_abs`) | **100.0%** (20 / 20) | **96.0%** (48 / 50 on Clean Hard) | **8.0 cm** / 9.9 cm | **5.21 ms** |
+| **Run 15c (Unified Champion)** | Run 14 Config + Clock-Free `8D` Proprioception + Stationary Dwell Trimming (`joint_abs`) | **100.0%** (20 / 20) | **96.0%** (48 / 50 on Clean Hard) · `5.7%` (`4/70` on Sim-to-Real DR) | **8.0 cm** / 9.9 cm | **5.21 ms** |
 | **Run 16a** | Run 15c Config + Relative Joint-Delta Action Chunks (`joint_delta`, `8D`) | **100.0%** (20 / 20) | **88.0%** (44 / 50 on Clean Hard) | 8.8 cm / 13.2 cm | 5.59 ms |
 | **Run 16b (`SE(3)` Task Space)** | Run 15c Config + 6-DoF/7-DoF Agnostic `10D` Fingertip `SE(3)` + `rot6d` (`eef_se3`) | 80.0% (16 / 20) | **88.0%** (44 / 50 on Clean Hard) | 10.0 cm / **9.6 cm** | 6.05 ms |
+| **Run 17 (Sim-to-Real DR 600)** | 600 Demos (`300 Clean + 300 DR`) + 3D Aux Pose + Rolling-Window Co-Training (`51.7 min`) | **85.0%** (Clean) / **`80.0%` (`DR-ID`)** | **76.0%** (Clean) / **`54.0%` (`DR-OOD`, `98/140` = `70.0%`)** | 10.4 cm / 14.4 cm (`DR-ID`) | **5.15 ms** |
+| **Run 17b (`K=4` Stratified Flow)** | Run 17 + `K=4` Stratified Multi-Sample Flow Amortization (`20` ep, `34.1 min`, `1.52x` faster) | **85.0%** (Clean) / **`70.0%` (`DR-ID`)** | **78.0%** (Clean) / **`54.0%` (`DR-OOD`, `97/140` = `69.3%`)** | 10.8 cm / 16.0 cm (`DR-ID`) | 5.20 ms |
+| **Run 17c (Generalist Champion)** | Run 17b + Removed Linear Aux Pose Shortcut + Locked [`VisionTrainConfig`](floraflow/training/config.py) (`33.3 min`) | **85.0%** (Clean) / **`75.0%` (`DR-ID`)** | **82.0%** (Clean) / **`58.0%` (`DR-OOD`, `102/140` = `72.9%`)** | 11.9 cm / 15.4 cm (`DR-ID`) | 5.77 ms |
 
 ### Explainable VLA Telemetry & Emergent Camera Attention
 

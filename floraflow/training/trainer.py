@@ -6,15 +6,17 @@ GPU-vectorized uint8 image normalization and asynchronous GPU metric accumulatio
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import time
-from typing import Any, Dict, Optional, Tuple
+from typing import Any, Dict, Optional, Sequence, Tuple, Union
 
 import h5py
 import torch
 from torch.utils.data import DataLoader
 
 from floraflow.training.augmentation import RandomShifter
+from floraflow.training.config import VisionTrainConfig
 from floraflow.training.dataset import VisionWateringDataset, WateringDemonstrationDataset
 from floraflow.training.flow_matching import ConditionalFlowMatcher
 from floraflow.training.model import FlowMatchingPolicy
@@ -168,135 +170,135 @@ def train_policy(
 
 
 def train_vision_policy(
-    data_path: str = "datasets/watering_demos_vision_3cam_300.h5",
-    save_dir: str = "checkpoints",
-    epochs: int = 50,
-    batch_size: int = 128,
-    lr: float = 5e-4,
-    weight_decay: float = 1e-4,
-    horizon: int = 16,
-    num_keypoints: int = 32,
-    vision_feat_dim: int = 64,
-    proprio_feat_dim: int = 64,
-    hidden_dim: int = 256,
-    num_blocks: int = 4,
-    gripper_weight: float = 2.5,
-    shift_aug: int = 4,
-    dropout: float = 0.0,
-    keypoint_noise: float = 0.0,
-    use_cross_attention: bool = False,
-    camera_dropout: float = 0.0,
-    dropout_cameras: Tuple[str, ...] = ("wrist_cam",),
-    use_aux_pose: bool = False,
-    aux_pose_weight: float = 0.5,
-    use_progress: bool = True,
-    proprio_history_lags: Tuple[int, ...] = (0,),
-    trim_stationary: bool = False,
-    action_space: str = "joint_abs",
-    device_str: str = "auto",
+    config: Optional[VisionTrainConfig] = None,
+    data_path: Optional[Union[str, Sequence[str]]] = None,
+    save_dir: Optional[str] = None,
+    epochs: Optional[int] = None,
+    batch_size: Optional[int] = None,
+    lr: Optional[float] = None,
+    num_flow_samples: Optional[int] = None,
+    num_keypoints: Optional[int] = None,
+    dropout: Optional[float] = None,
+    keypoint_noise: Optional[float] = None,
+    camera_dropout: Optional[float] = None,
     cameras: Optional[Tuple[str, ...]] = None,
+    device_str: str = "auto",
 ) -> Dict[str, Any]:
-    """Train Vision Flow Matching action chunker policy."""
+    """Train Vision Flow Matching action chunker policy using a frozen VisionTrainConfig."""
+    base_cfg = config if config is not None else VisionTrainConfig()
+    overrides: Dict[str, Any] = {}
+    if data_path is not None:
+        overrides["data_path"] = data_path
+    if save_dir is not None:
+        overrides["save_dir"] = save_dir
+    if epochs is not None:
+        overrides["epochs"] = epochs
+    if batch_size is not None:
+        overrides["batch_size"] = batch_size
+    if lr is not None:
+        overrides["lr"] = lr
+    if num_flow_samples is not None:
+        overrides["num_flow_samples"] = num_flow_samples
+    if num_keypoints is not None:
+        overrides["num_keypoints"] = num_keypoints
+    if dropout is not None:
+        overrides["dropout"] = dropout
+    if keypoint_noise is not None:
+        overrides["keypoint_noise"] = keypoint_noise
+    if camera_dropout is not None:
+        overrides["camera_dropout"] = camera_dropout
+    if cameras is not None:
+        overrides["cameras"] = cameras
+
+    cfg = base_cfg.with_overrides(**overrides) if overrides else base_cfg
+
+    first_path = cfg.data_path[0]
+    with h5py.File(first_path, "r") as f:
+        if "cameras" in f.attrs and cameras is None and config is None:
+            cfg = cfg.with_overrides(cameras=tuple(f.attrs["cameras"]))
+
     device = resolve_compute_device(device_str)
     print(f"Using compute device: {device}")
 
-    save_path = Path(save_dir).resolve()
+    save_path = Path(cfg.save_dir).resolve()
     save_path.mkdir(parents=True, exist_ok=True)
 
-    if cameras is None:
-        with h5py.File(data_path, "r") as f:
-            if "cameras" in f.attrs:
-                cameras = tuple(f.attrs["cameras"])
-            else:
-                cameras = ("third_person_cam", "overhead_cam")
-    print(f"Active cameras: {cameras}")
+    config_file = save_path / "train_config.json"
+    with open(config_file, "w") as f:
+        json.dump(cfg.to_dict(), f, indent=2)
+    print(f"Saved frozen training config to: {config_file}")
 
-    print(f"Loading visual demonstration dataset from: {data_path}")
+    diffs = cfg.diff_from_default()
+    if diffs:
+        diff_str = ", ".join(f"{k}={cur} (default={dflt})" for k, (dflt, cur) in diffs.items())
+        print(f"Non-default config overrides: {diff_str}")
+    else:
+        print("Config check: 100% canonical VisionTrainConfig defaults active.")
+
+    print(f"Active cameras: {cfg.cameras}")
+    print(f"Loading visual demonstration dataset from: {cfg.data_path}")
     dataset = VisionWateringDataset(
-        h5_path=data_path,
-        horizon=horizon,
-        cameras=cameras,
+        h5_path=cfg.data_path,
+        horizon=cfg.horizon,
+        cameras=cfg.cameras,
         preload=True,
-        use_progress=use_progress,
-        proprio_history_lags=proprio_history_lags,
-        trim_stationary=trim_stationary,
-        action_space=action_space,
         return_uint8_images=True,
     )
     num_samples = len(dataset)
-    num_batches = num_samples // batch_size
+    num_batches = num_samples // cfg.batch_size
     print(
-        f"Dataset loaded: {num_samples} samples across {num_batches} batches/epoch "
-        f"(proprio_dim={dataset.proprio_dim}, action_space={action_space}, use_progress={use_progress}, "
-        f"lags={dataset.proprio_history_lags}, trim_stationary={trim_stationary})."
+        f"Dataset loaded: {len(dataset.episodes_act)} episodes, {num_samples} samples across {num_batches} batches/epoch "
+        f"(proprio_dim={dataset.proprio_dim}, act_dim={dataset.act_dim}, stride={dataset.sample_stride}, "
+        f"num_flow_samples={cfg.num_flow_samples})."
     )
 
     stats_file = save_path / "vision_stats.json"
     dataset.save_stats(str(stats_file))
     print(f"Vision normalization statistics saved to: {stats_file}")
 
-    model = VisionFlowMatchingPolicy(
-        act_dim=dataset.act_dim,
-        horizon=horizon,
-        proprio_dim=dataset.proprio_dim,
-        num_keypoints=num_keypoints,
-        vision_feat_dim=vision_feat_dim,
-        proprio_feat_dim=proprio_feat_dim,
-        hidden_dim=hidden_dim,
-        num_blocks=num_blocks,
-        dropout=dropout,
-        keypoint_noise=keypoint_noise,
-        cameras=cameras,
-        use_cross_attention=use_cross_attention,
-        camera_dropout=camera_dropout,
-        dropout_cameras=dropout_cameras,
-        use_aux_pose=use_aux_pose,
-    ).to(device)
+    model = VisionFlowMatchingPolicy.from_config(cfg).to(device)
 
     total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
     print(f"Vision policy initialized with {total_params:,} trainable parameters (fused_dim={model.fused_dim}).")
-    if dropout > 0.0 or keypoint_noise > 0.0:
-        print(f"Regularization active: dropout={dropout:.2f}, keypoint_noise={keypoint_noise:.4f}.")
-    if camera_dropout > 0.0:
-        print(f"Modality masking active: Camera dropout p={camera_dropout:.2f} on {dropout_cameras}.")
-    if use_aux_pose:
-        print(f"3D Ruler Quiz active: Auxiliary 3D Pose Supervision (weight={aux_pose_weight:.2f}).")
+    if cfg.dropout > 0.0 or cfg.keypoint_noise > 0.0 or cfg.camera_dropout > 0.0:
+        print(
+            f"Regularization active: dropout={cfg.dropout:.2f}, "
+            f"keypoint_noise={cfg.keypoint_noise:.4f}, "
+            f"camera_dropout={cfg.camera_dropout:.2f} on {cfg.dropout_cameras}."
+        )
 
-    shifter = RandomShifter(max_shift=shift_aug) if shift_aug > 0 else None
+    shifter = RandomShifter(max_shift=cfg.shift_aug) if cfg.shift_aug > 0 else None
     if shifter is not None:
-        print(f"Visual data augmentation: RandomShifter(max_shift={shift_aug}) active.")
-    else:
-        print("Visual data augmentation: RandomShifter disabled (shift_aug=0, exact multi-view geometry).")
+        print(f"Visual data augmentation: RandomShifter(max_shift={cfg.shift_aug}) active.")
 
-    cfm = ConditionalFlowMatcher(sigma_min=1e-4, gripper_weight=gripper_weight)
-    optimizer = torch.optim.AdamW(model.parameters(), lr=lr, weight_decay=weight_decay)
-    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=epochs, eta_min=1e-5)
+    cfm = ConditionalFlowMatcher(sigma_min=1e-4, gripper_weight=cfg.gripper_weight)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=cfg.lr, weight_decay=cfg.weight_decay)
+    scheduler = torch.optim.lr_scheduler.CosineAnnealingLR(optimizer, T_max=cfg.epochs, eta_min=1e-5)
 
     best_loss = float("inf")
     t_start = time.time()
 
     print("\nStarting Vision Flow Matching training loop:")
-    for epoch in range(1, epochs + 1):
+    for epoch in range(1, cfg.epochs + 1):
         model.train()
         epoch_loss_t = torch.zeros((), device=device, dtype=torch.float32)
-        epoch_pose_loss_t = torch.zeros((), device=device, dtype=torch.float32)
         epoch_v_norm_t = torch.zeros((), device=device, dtype=torch.float32)
         epoch_u_norm_t = torch.zeros((), device=device, dtype=torch.float32)
         batches = 0
 
-        perm = torch.randperm(num_samples)
+        perm = dataset.sample_epoch_permutation()
         for b_idx in range(num_batches):
-            batch_indices = perm[b_idx * batch_size : (b_idx + 1) * batch_size]
+            batch_indices = perm[b_idx * cfg.batch_size : (b_idx + 1) * cfg.batch_size]
             dev_obs, dev_actions = dataset.get_batch(batch_indices, device=device, shifter=shifter)
 
             optimizer.zero_grad(set_to_none=True)
-            cfm_loss, metrics = cfm.compute_loss(model, dev_actions, dev_obs, async_metrics=True)
-            if use_aux_pose and "aux_pose" in dev_obs:
-                pose_loss = model.compute_aux_pose_loss(dev_obs["aux_pose"])
-                loss = cfm_loss + aux_pose_weight * pose_loss
-                epoch_pose_loss_t += pose_loss.detach().float()
-            else:
-                loss = cfm_loss
+            loss, metrics = cfm.compute_loss(
+                model,
+                dev_actions,
+                dev_obs,
+                async_metrics=True,
+                num_flow_samples=cfg.num_flow_samples,
+            )
             loss.backward()
 
             torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
@@ -311,17 +313,15 @@ def train_vision_policy(
 
         denom = float(max(batches, 1))
         mean_loss = float(epoch_loss_t.item()) / denom
-        mean_pose_loss = float(epoch_pose_loss_t.item()) / denom
         mean_v_norm = float(epoch_v_norm_t.item()) / denom
         mean_u_norm = float(epoch_u_norm_t.item()) / denom
         current_lr = scheduler.get_last_lr()[0]
         elapsed = time.time() - t_start
 
-        if epoch % 5 == 0 or epoch == 1 or epoch == epochs:
-            pose_str = f" | PoseMSE: {mean_pose_loss:.5f}" if use_aux_pose else ""
+        if epoch % 5 == 0 or epoch == 1 or epoch == cfg.epochs:
             print(
-                f"Epoch [{epoch:3d}/{epochs:3d}] | "
-                f"Loss: {mean_loss:.5f}{pose_str} | "
+                f"Epoch [{epoch:3d}/{cfg.epochs:3d}] | "
+                f"Loss: {mean_loss:.5f} | "
                 f"|v|: {mean_v_norm:.3f} | "
                 f"|u|: {mean_u_norm:.3f} | "
                 f"LR: {current_lr:.2e} | "
@@ -337,29 +337,7 @@ def train_vision_policy(
                     "model_state_dict": model.state_dict(),
                     "optimizer_state_dict": optimizer.state_dict(),
                     "loss": best_loss,
-                    "config": {
-                        "act_dim": dataset.act_dim,
-                        "action_space": action_space,
-                        "horizon": horizon,
-                        "proprio_dim": dataset.proprio_dim,
-                        "use_progress": use_progress,
-                        "proprio_history_lags": list(dataset.proprio_history_lags),
-                        "trim_stationary": trim_stationary,
-                        "num_keypoints": num_keypoints,
-                        "vision_feat_dim": vision_feat_dim,
-                        "proprio_feat_dim": proprio_feat_dim,
-                        "hidden_dim": hidden_dim,
-                        "num_blocks": num_blocks,
-                        "dropout": dropout,
-                        "keypoint_noise": keypoint_noise,
-                        "gripper_weight": gripper_weight,
-                        "cameras": list(cameras),
-                        "use_cross_attention": use_cross_attention,
-                        "camera_dropout": camera_dropout,
-                        "dropout_cameras": list(dropout_cameras),
-                        "use_aux_pose": use_aux_pose,
-                        "aux_pose_weight": aux_pose_weight,
-                    },
+                    "config": cfg.to_dict(),
                     "stats": dataset.stats,
                 },
                 ckpt_path,
@@ -373,4 +351,5 @@ def train_vision_policy(
         "elapsed_s": total_elapsed,
         "checkpoint_path": str(save_path / "best_vision_policy.pt"),
         "stats_path": str(stats_file),
+        "config_path": str(config_file),
     }

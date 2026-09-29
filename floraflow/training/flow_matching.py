@@ -24,6 +24,7 @@ class ConditionalFlowMatcher:
         x1: torch.Tensor,
         obs: Union[torch.Tensor, Dict[str, torch.Tensor]],
         async_metrics: bool = False,
+        num_flow_samples: int = 1,
     ) -> Tuple[torch.Tensor, Dict[str, Any]]:
         """Compute CFM vector field regression loss.
 
@@ -33,6 +34,9 @@ class ConditionalFlowMatcher:
             obs: Observation feature conditioning tensor or dict of tensors.
             async_metrics: If True, returns detached GPU scalar tensors in metrics
                 instead of calling .item() mid-batch, avoiding GPU/TPU pipeline stalls.
+            num_flow_samples: Number of stratified flow matching (t, x0) samples K evaluated
+                per observation feature extraction pass. When K > 1, visual features are
+                extracted once (B, D_obs) and amortized across K stratified time intervals.
 
         Returns:
             loss: Scalar MSE tensor.
@@ -40,24 +44,39 @@ class ConditionalFlowMatcher:
         """
         b = x1.shape[0]
         device = x1.device
+        k = max(1, int(num_flow_samples))
 
-        # Sample uniform diffusion time t in [0, 1]
-        t = torch.rand(b, device=device, dtype=torch.float32)
+        if k > 1:
+            obs_cond = model.extract_obs_features(obs) if hasattr(model, "extract_obs_features") else obs
+            if isinstance(obs_cond, torch.Tensor):
+                obs_input: Union[torch.Tensor, Dict[str, torch.Tensor]] = obs_cond.repeat_interleave(k, dim=0)
+            else:
+                obs_input = {key: val.repeat_interleave(k, dim=0) for key, val in obs_cond.items()}
+            x1_target = x1.repeat_interleave(k, dim=0)
+            strata = torch.arange(k, device=device, dtype=torch.float32).unsqueeze(0)
+            u = torch.rand(b, k, device=device, dtype=torch.float32)
+            t = ((strata + u) / float(k)).reshape(b * k)
+        else:
+            obs_input = obs
+            x1_target = x1
+            t = torch.rand(b, device=device, dtype=torch.float32)
+
+        bk = x1_target.shape[0]
 
         # Sample source Gaussian noise x0
-        x0 = torch.randn_like(x1)
+        x0 = torch.randn_like(x1_target)
 
         # Optimal transport conditional probability path
         # x_t = (1 - (1 - sigma_min) * t) * x0 + t * x1
-        t_expanded = t.view(b, 1, 1)
-        x_t = (1.0 - (1.0 - self.sigma_min) * t_expanded) * x0 + t_expanded * x1
+        t_expanded = t.view(bk, 1, 1)
+        x_t = (1.0 - (1.0 - self.sigma_min) * t_expanded) * x0 + t_expanded * x1_target
 
         # Analytical conditional target velocity along straight-line path
         # u_t = d(x_t)/dt = x1 - (1 - sigma_min) * x0
-        u_t = x1 - (1.0 - self.sigma_min) * x0
+        u_t = x1_target - (1.0 - self.sigma_min) * x0
 
         # Predict vector field velocity
-        v_pred = model(x_t, t, obs)
+        v_pred = model(x_t, t, obs_input)
 
         # Weighted mean squared error (arm pose: 1.0, gripper final dim: gripper_weight)
         sq_err = (v_pred.float() - u_t.float()) ** 2

@@ -36,14 +36,13 @@ def test_vision_policy_extract_visual_telemetry() -> None:
     policy = VisionFlowMatchingPolicy(
         act_dim=8,
         horizon=16,
-        proprio_dim=9,
+        proprio_dim=8,
         num_keypoints=16,
         vision_feat_dim=32,
         proprio_feat_dim=64,
         hidden_dim=128,
         num_blocks=2,
         cameras=cameras,
-        use_cross_attention=True,
     )
     policy.eval()
 
@@ -51,7 +50,7 @@ def test_vision_policy_extract_visual_telemetry() -> None:
         "rgb_third_person_cam": torch.rand(1, 3, 128, 128),
         "rgb_overhead_cam": torch.rand(1, 3, 128, 128),
         "rgb_wrist_cam": torch.rand(1, 3, 128, 128),
-        "proprio": torch.randn(1, 9),
+        "proprio": torch.randn(1, 8),
     }
 
     telemetry = policy.extract_visual_telemetry(obs)
@@ -97,14 +96,13 @@ def test_visualizer_dashboard_rendering_and_export(tmp_path: Path) -> None:
     policy = VisionFlowMatchingPolicy(
         act_dim=8,
         horizon=16,
-        proprio_dim=9,
+        proprio_dim=8,
         num_keypoints=16,
         vision_feat_dim=32,
         proprio_feat_dim=64,
         hidden_dim=64,
         num_blocks=2,
         cameras=cameras,
-        use_cross_attention=True,
     )
     policy.eval()
 
@@ -128,7 +126,7 @@ def test_visualizer_dashboard_rendering_and_export(tmp_path: Path) -> None:
             f"rgb_{c}": torch.from_numpy(obs[f"rgb_{c}"]).permute(2, 0, 1).unsqueeze(0).float() / 255.0
             for c in cameras
         }
-        model_obs["proprio"] = torch.zeros(1, 9)
+        model_obs["proprio"] = torch.zeros(1, 8)
         pred_chunk = np.tile(np.append(obs["arm_qpos"], 1.0), (16, 1)).astype(np.float32)
 
         cb({

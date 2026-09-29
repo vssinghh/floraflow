@@ -6,6 +6,7 @@ collision-free demonstration archives as compressed HDF5 files inside datasets/.
 
 from __future__ import annotations
 
+import json
 from pathlib import Path
 import time
 from typing import Tuple
@@ -39,6 +40,7 @@ def generate_demonstrations(
     output_path: str = "datasets/watering_demos_100.h5",
     start_seed: int = 0,
     widened_bounds: bool = False,
+    domain_rand: bool = False,
 ) -> None:
     """Generate and store state-based expert demonstrations.
 
@@ -47,6 +49,7 @@ def generate_demonstrations(
         output_path: Destination path for the HDF5 archive.
         start_seed: Starting random seed.
         widened_bounds: Whether to sample from expanded desk workspace bounds.
+        domain_rand: Whether to apply Sim-to-Real visual and physical domain randomization.
     """
     out_file = Path(output_path).resolve()
     out_file.parent.mkdir(parents=True, exist_ok=True)
@@ -68,10 +71,11 @@ def generate_demonstrations(
         control_hz=20,
         can_pos_range=can_range,
         plant_pos_range=plant_range,
+        domain_rand=domain_rand,
     )
     planner = PourExpertPlanner(env)
 
-    print(f"Initializing demonstration collection: {num_demos} episodes target.")
+    print(f"Initializing demonstration collection: {num_demos} episodes target (domain_rand={domain_rand}).")
     print(f"Output file destination: {out_file}")
 
     total_samples = 0
@@ -120,6 +124,9 @@ def generate_demonstrations(
             demo_grp.attrs["success"] = success
             demo_grp.attrs["can_pos_init"] = init_can_pos
             demo_grp.attrs["plant_pos_init"] = init_plant_pos
+            demo_grp.attrs["domain_rand"] = bool(domain_rand)
+            if env.last_domain_params is not None:
+                demo_grp.attrs["domain_params_json"] = json.dumps(env.last_domain_params)
             demo_grp.attrs["language_instruction"] = "Grasp the watering can and water the desk plant"
 
             total_samples += ep_len
@@ -141,6 +148,7 @@ def generate_demonstrations(
         f.attrs["physics_dt"] = 0.002
         f.attrs["task_name"] = "desk_plant_watering"
         f.attrs["env_class"] = "DeskWateringEnv"
+        f.attrs["domain_rand"] = bool(domain_rand)
 
     elapsed_total = time.time() - t0
     print(
@@ -156,6 +164,7 @@ def generate_vision_demonstrations(
     widened_bounds: bool = True,
     resolution: Tuple[int, int] = (128, 128),
     cameras: Tuple[str, ...] = ("third_person_cam", "overhead_cam", "wrist_cam"),
+    domain_rand: bool = False,
 ) -> None:
     """Collect and persist visual demonstrations with multi-camera streams.
 
@@ -166,6 +175,7 @@ def generate_vision_demonstrations(
         widened_bounds: Whether to sample from widened tabletop workspace bounds.
         resolution: Camera image resolution (width, height).
         cameras: Tuple of camera names to capture.
+        domain_rand: Whether to apply Sim-to-Real visual and physical domain randomization.
     """
     out_file = Path(output_path).resolve()
     out_file.parent.mkdir(parents=True, exist_ok=True)
@@ -191,10 +201,11 @@ def generate_vision_demonstrations(
         include_rgb=True,
         rgb_cameras=cameras,
         rgb_resolution=resolution,
+        domain_rand=domain_rand,
     )
     planner = PourExpertPlanner(env)
 
-    print(f"Initializing visual demonstration collection: {num_demos} episodes target.")
+    print(f"Initializing visual demonstration collection: {num_demos} episodes target (domain_rand={domain_rand}).")
     print(f"Cameras active: {cameras} at {resolution[0]}x{resolution[1]}")
     print(f"Destination: {out_file}")
 
@@ -266,6 +277,9 @@ def generate_vision_demonstrations(
             demo_grp.attrs["success"] = success
             demo_grp.attrs["can_pos_init"] = init_can_pos
             demo_grp.attrs["plant_pos_init"] = init_plant_pos
+            demo_grp.attrs["domain_rand"] = bool(domain_rand)
+            if env.last_domain_params is not None:
+                demo_grp.attrs["domain_params_json"] = json.dumps(env.last_domain_params)
             demo_grp.attrs["language_instruction"] = "Grasp the watering can and water the desk plant"
 
             total_samples += ep_len
@@ -290,6 +304,7 @@ def generate_vision_demonstrations(
         f.attrs["env_class"] = "DeskWateringEnv"
         f.attrs["cameras"] = list(cameras)
         f.attrs["resolution"] = list(resolution)
+        f.attrs["domain_rand"] = bool(domain_rand)
 
     elapsed_total = time.time() - t0
     file_size_mb = out_file.stat().st_size / (1024 * 1024)

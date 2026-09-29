@@ -15,8 +15,8 @@ import numpy as np
 import torch
 
 from floraflow.common.env import DeskWateringEnv
-from floraflow.common.kinematics import IKSolver, rot6d_to_rotmat, rotmat_to_rot6d
 from floraflow.evaluation.evaluator import BenchmarkScorecard, EpisodeResult
+from floraflow.training.config import VisionTrainConfig
 from floraflow.training.flow_matching import ConditionalFlowMatcher
 from floraflow.training.vision_model import VisionFlowMatchingPolicy
 
@@ -46,7 +46,7 @@ class VisionPolicyEvaluator:
             raise FileNotFoundError(f"Vision checkpoint file not found: {ckpt_file}")
 
         ckpt = torch.load(ckpt_file, map_location=self.device, weights_only=False)
-        config = ckpt["config"]
+        self.cfg = VisionTrainConfig.from_dict(ckpt["config"], strict=False)
         self.stats = ckpt["stats"]
 
         self.proprio_mean = torch.tensor(self.stats["proprio_mean"], device=self.device, dtype=torch.float32)
@@ -54,33 +54,12 @@ class VisionPolicyEvaluator:
         self.act_mean = np.array(self.stats["act_mean"], dtype=np.float32)
         self.act_std = np.array(self.stats["act_std"], dtype=np.float32)
 
-        self.horizon = config["horizon"]
-        self.act_dim = config["act_dim"]
-        self.action_space = str(config.get("action_space", "joint_abs"))
-        self.proprio_dim = int(config.get("proprio_dim", 9))
-        self.use_progress = bool(config.get("use_progress", self.proprio_dim in (9, 11)))
-        self.proprio_history_lags: Tuple[int, ...] = tuple(int(l) for l in config.get("proprio_history_lags", [0]))
-        self._proprio_buffer: List[np.ndarray] = []
-        self.cameras = tuple(config.get("cameras", ["third_person_cam", "overhead_cam"]))
+        self.horizon = self.cfg.horizon
+        self.act_dim = self.cfg.act_dim
+        self.proprio_dim = self.cfg.proprio_dim
+        self.cameras = self.cfg.cameras
 
-        self.model = VisionFlowMatchingPolicy(
-            act_dim=self.act_dim,
-            horizon=self.horizon,
-            proprio_dim=self.proprio_dim,
-            num_keypoints=config["num_keypoints"],
-            vision_feat_dim=config["vision_feat_dim"],
-            proprio_feat_dim=config["proprio_feat_dim"],
-            hidden_dim=config["hidden_dim"],
-            num_blocks=config["num_blocks"],
-            dropout=config.get("dropout", 0.0),
-            keypoint_noise=config.get("keypoint_noise", 0.0),
-            cameras=self.cameras,
-            use_cross_attention=config.get("use_cross_attention", False),
-            attn_heads=config.get("attn_heads", 4),
-            camera_dropout=config.get("camera_dropout", 0.0),
-            dropout_cameras=tuple(config.get("dropout_cameras", ["wrist_cam"])),
-            use_aux_pose=config.get("use_aux_pose", False),
-        ).to(self.device)
+        self.model = VisionFlowMatchingPolicy.from_config(self.cfg).to(self.device)
         self.model.load_state_dict(ckpt["model_state_dict"])
         self.model.eval()
 
@@ -92,81 +71,31 @@ class VisionPolicyEvaluator:
             rgb_cameras=self.cameras,
             rgb_resolution=resolution,
         )
-        self.ik_solver = IKSolver(
-            self.env.model,
-            site_name="pinch",
-            pos_tol=4e-3,
-            rot_tol=0.15,
-            rot_weight=0.04,
-            nullspace_weight=0.05,
-            max_iterations=100,
-        )
-        self._last_ik_q: Optional[np.ndarray] = None
-
-    def _to_env_action(self, act: np.ndarray, q_curr: np.ndarray) -> np.ndarray:
-        """Convert policy action vector (8D joint or 10D eef_se3) into an 8D motor command for env.step."""
-        if self.action_space == "eef_se3":
-            target_pos = act[:3]
-            target_rot = rot6d_to_rotmat(act[3:9])
-            grip_cmd = float(act[9])
-            q_seed = self._last_ik_q if self._last_ik_q is not None else q_curr
-            res = self.ik_solver.solve(target_pos, target_rot, q_init=q_seed)
-            self._last_ik_q = res.q.copy()
-            return np.concatenate([res.q, [grip_cmd]]).astype(np.float32)
-        return act
 
     def prepare_vision_obs(
         self,
         env_obs: Dict[str, np.ndarray],
-        step_idx: int = 0,
     ) -> Dict[str, torch.Tensor]:
         """Convert environment observations into normalized PyTorch model inputs.
 
-        Strictly extracts ONLY raw camera frames and physical proprioception (8D joint, 10D eef_se3, or history).
+        Strictly extracts ONLY raw camera frames and 8D physical proprioception (arm_qpos + gripper_width).
         Does NOT access can_pos, plant_pos, spout_pos, or grip_pos.
         """
         model_obs: Dict[str, torch.Tensor] = {}
 
         for cam in self.cameras:
             raw_img = env_obs[f"rgb_{cam}"]  # (H, W, 3) uint8
-            # Permute to (1, C, H, W) and scale to [0, 1]
             img_tensor = torch.from_numpy(raw_img).permute(2, 0, 1).unsqueeze(0).float() / 255.0
             model_obs[f"rgb_{cam}"] = img_tensor.to(self.device)
 
-        # Assemble base proprioception: 8D joint or 10D eef_se3 (+ optional 1D progress)
         arm_qpos = env_obs["arm_qpos"]
-        if self.action_space == "eef_se3":
-            eef_pos, eef_rot = self.ik_solver.forward_kinematics(arm_qpos)
-            arm_state = np.concatenate([eef_pos, rotmat_to_rot6d(eef_rot)], axis=-1).astype(np.float32)
-        else:
-            arm_state = arm_qpos
-
         gripper_w = env_obs["gripper_width"]
         if np.ndim(gripper_w) == 0:
             gripper_w = np.array([gripper_w], dtype=np.float32)
-        if self.use_progress:
-            progress = np.array([min(step_idx / 174.0, 1.0)], dtype=np.float32)
-            base_proprio = np.concatenate([arm_state, gripper_w, progress], axis=-1).astype(np.float32)
-        else:
-            base_proprio = np.concatenate([arm_state, gripper_w], axis=-1).astype(np.float32)
-
-        if step_idx == 0 or len(self._proprio_buffer) == 0:
-            self._proprio_buffer = [base_proprio]
-        else:
-            self._proprio_buffer.append(base_proprio)
-
-        if self.proprio_history_lags == (0,):
-            proprio = base_proprio
-        else:
-            curr_idx = len(self._proprio_buffer) - 1
-            proprio = np.concatenate(
-                [self._proprio_buffer[max(0, curr_idx - lag)] for lag in self.proprio_history_lags],
-                axis=-1,
-            ).astype(np.float32)
+        proprio = np.concatenate([arm_qpos, gripper_w], axis=-1).astype(np.float32)
 
         proprio_tensor = torch.from_numpy(proprio).to(self.device).unsqueeze(0)
-        norm_proprio = (proprio_tensor - self.proprio_mean) / self.proprio_std
-        model_obs["proprio"] = norm_proprio
+        model_obs["proprio"] = (proprio_tensor - self.proprio_mean) / self.proprio_std
 
         return model_obs
 
@@ -181,12 +110,16 @@ class VisionPolicyEvaluator:
         temporal_ensemble: bool = True,
         ensemble_decay: float = 0.05,
         step_callback: Optional[Callable[[Dict[str, Any]], None]] = None,
+        domain_params: Optional[Dict[str, Any]] = None,
     ) -> EpisodeResult:
         """Execute one complete closed-loop evaluation episode using raw vision."""
         torch.manual_seed(seed)
-        self._proprio_buffer.clear()
-        obs = self.env.reset(seed=seed, can_xy=can_xy, plant_xy=plant_xy)
-        self._last_ik_q = obs["arm_qpos"].copy()
+        obs = self.env.reset(
+            seed=seed,
+            can_xy=can_xy,
+            plant_xy=plant_xy,
+            domain_params=domain_params,
+        )
         actual_can_xy = (float(obs["can_pos"][0]), float(obs["can_pos"][1]))
         actual_plant_xy = (float(obs["plant_pos"][0]), float(obs["plant_pos"][1]))
 
@@ -204,7 +137,7 @@ class VisionPolicyEvaluator:
             ensemble_weights = np.exp(-ensemble_decay * np.arange(self.horizon)).astype(np.float32)
 
             while step_count < max_steps:
-                model_obs = self.prepare_vision_obs(obs, step_idx=step_count)
+                model_obs = self.prepare_vision_obs(obs)
 
                 t_infer_start = time.perf_counter()
                 with torch.no_grad():
@@ -220,17 +153,13 @@ class VisionPolicyEvaluator:
 
                 pred_chunk = pred_chunk_norm.squeeze(0).cpu().numpy()
                 pred_chunk = pred_chunk * self.act_std + self.act_mean
-                if self.action_space == "joint_delta":
-                    pred_chunk = pred_chunk.copy()
-                    pred_chunk[:, :7] = obs["arm_qpos"][None, :] + pred_chunk[:, :7]
 
                 for h in range(self.horizon):
                     idx = step_count + h
                     action_buffer[idx] += ensemble_weights[h] * pred_chunk[h]
                     weight_buffer[idx] += ensemble_weights[h]
 
-                blended_act = action_buffer[step_count] / max(weight_buffer[step_count], 1e-6)
-                env_act = self._to_env_action(blended_act, obs["arm_qpos"])
+                env_act = action_buffer[step_count] / max(weight_buffer[step_count], 1e-6)
 
                 if step_callback is not None:
                     spout_d = float(np.linalg.norm(obs["spout_pos"] - obs["plant_pos"]))
@@ -263,7 +192,7 @@ class VisionPolicyEvaluator:
                     is_pouring = True
         else:
             while step_count < max_steps:
-                model_obs = self.prepare_vision_obs(obs, step_idx=step_count)
+                model_obs = self.prepare_vision_obs(obs)
 
                 t_infer_start = time.perf_counter()
                 with torch.no_grad():
@@ -279,14 +208,10 @@ class VisionPolicyEvaluator:
 
                 pred_chunk = pred_chunk_norm.squeeze(0).cpu().numpy()
                 pred_chunk = pred_chunk * self.act_std + self.act_mean
-                if self.action_space == "joint_delta":
-                    pred_chunk = pred_chunk.copy()
-                    pred_chunk[:, :7] = obs["arm_qpos"][None, :] + pred_chunk[:, :7]
 
                 steps_to_exec = min(exec_horizon, max_steps - step_count)
                 for i in range(steps_to_exec):
-                    action = pred_chunk[i]
-                    env_act = self._to_env_action(action, obs["arm_qpos"])
+                    env_act = pred_chunk[i]
                     if step_callback is not None:
                         spout_d = float(np.linalg.norm(obs["spout_pos"] - obs["plant_pos"]))
                         tilt_d = float(obs["tilt_angle_deg"][0])
@@ -342,14 +267,16 @@ class VisionPolicyEvaluator:
         num_ode_steps: int = 10,
         temporal_ensemble: bool = True,
         ensemble_decay: float = 0.05,
+        domain_params_list: Optional[List[Optional[Dict[str, Any]]]] = None,
     ) -> BenchmarkScorecard:
-        """Run benchmark across list of seeds and object locations."""
+        """Run benchmark across list of seeds, object locations, and optional domain randomization dicts."""
         results: List[EpisodeResult] = []
         n = len(seeds)
 
         for i, seed in enumerate(seeds):
             c_xy = can_xys[i] if can_xys is not None else None
             p_xy = plant_xys[i] if plant_xys is not None else None
+            d_params = domain_params_list[i] if domain_params_list is not None else None
 
             res = self.run_episode(
                 seed=seed,
@@ -360,6 +287,7 @@ class VisionPolicyEvaluator:
                 num_ode_steps=num_ode_steps,
                 temporal_ensemble=temporal_ensemble,
                 ensemble_decay=ensemble_decay,
+                domain_params=d_params,
             )
             results.append(res)
             status_char = "PASS" if res.success else "FAIL"

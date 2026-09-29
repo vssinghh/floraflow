@@ -156,3 +156,39 @@ def test_stored_hdf5_datasets_clean_spawns() -> None:
                 )
 
 
+def test_env_domain_randomization_and_restore(tmp_path) -> None:
+    """Verify Sim-to-Real domain randomization sampling, application, nominal restore, and 4-split manifest."""
+    from floraflow.evaluation.evaluator import load_or_create_sim2real_benchmark
+
+    env = DeskWateringEnv(domain_rand=True)
+    nom_light_pos = env._init_light_pos.copy()
+    nom_can_mass = float(env._init_body_mass[env._can_body_id])
+
+    # 1. Reset with domain_rand=True must perturb lighting, camera extrinsics, and physical mass
+    env.reset(seed=300)
+    assert env.last_domain_params is not None
+    assert "can_mass_scale" in env.last_domain_params
+    assert "cam_pos_deltas" in env.last_domain_params
+    assert not np.allclose(env.model.light_pos, nom_light_pos)
+    assert abs(float(env.model.body_mass[env._can_body_id]) - nom_can_mass) > 1e-5
+
+    # 2. Reset with domain_rand=False must restore exact nominal studio parameters
+    env.domain_rand = False
+    env.reset(seed=300)
+    assert env.last_domain_params is None
+    np.testing.assert_allclose(env.model.light_pos, nom_light_pos, atol=1e-6)
+    assert abs(float(env.model.body_mass[env._can_body_id]) - nom_can_mass) < 1e-6
+
+    # 3. Verify 4-split Sim-to-Real benchmark manifest generation & reload
+    manifest_file = tmp_path / "test_sim2real_manifest.json"
+    manifest = load_or_create_sim2real_benchmark(manifest_path=str(manifest_file))
+    assert manifest_file.exists()
+    assert set(manifest.keys()) == {"clean_id", "clean_ood", "dr_id", "dr_ood"}
+    assert len(manifest["clean_id"]) == 20
+    assert len(manifest["clean_ood"]) == 50
+    assert len(manifest["dr_id"]) == 20
+    assert len(manifest["dr_ood"]) == 50
+    assert manifest["dr_id"][0]["domain_params"] is not None
+    assert manifest["clean_id"][0]["domain_params"] is None
+
+

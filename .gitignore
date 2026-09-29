@@ -45,6 +45,10 @@ checkpoints/*
 !checkpoints/run15c_clock_free_trimmed8d/
 !checkpoints/run15c_clock_free_trimmed8d/best_vision_policy.pt
 !checkpoints/run15c_clock_free_trimmed8d/vision_stats.json
+!checkpoints/run17c_sim2real_dr_600_k4/
+!checkpoints/run17c_sim2real_dr_600_k4/best_vision_policy.pt
+!checkpoints/run17c_sim2real_dr_600_k4/vision_stats.json
+!checkpoints/run17c_sim2real_dr_600_k4/train_config.json
 *.mp4
 *.png
 !assets/*.png

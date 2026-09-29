@@ -8,15 +8,12 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, List, Optional, Tuple
+from typing import Dict, List, Optional, Sequence, Tuple, Union
 
 import h5py
-import mujoco
 import numpy as np
 import torch
 from torch.utils.data import Dataset
-
-from floraflow.common.kinematics import IKSolver, rotmat_to_rot6d
 
 OBS_BASE_KEYS = [
     "arm_qpos",
@@ -190,67 +187,69 @@ class WateringDemonstrationDataset(Dataset):
 
 
 class VisionWateringDataset(Dataset):
-    """PyTorch Dataset yielding multi-camera image observations and action chunks."""
+    """PyTorch Dataset yielding multi-camera image observations, 8D proprioception, and 8D action chunks."""
 
     def __init__(
         self,
-        h5_path: str = "datasets/watering_demos_vision_100.h5",
+        h5_path: Union[str, Path, Sequence[Union[str, Path]]] = "datasets/watering_demos_vision_3cam_300.h5",
         horizon: int = 16,
-        cameras: Tuple[str, ...] = ("third_person_cam", "overhead_cam"),
+        cameras: Tuple[str, ...] = ("third_person_cam", "overhead_cam", "wrist_cam"),
         stats: Optional[Dict[str, np.ndarray]] = None,
         preload: bool = True,
-        use_progress: bool = True,
-        proprio_history_lags: Tuple[int, ...] = (0,),
-        trim_stationary: bool = False,
-        action_space: str = "joint_abs",
         return_uint8_images: bool = False,
+        sample_stride: Optional[int] = None,
     ) -> None:
         """Initialize Vision Demonstration Dataset.
 
         Args:
-            h5_path: Path to the HDF5 demonstration archive.
+            h5_path: Path or sequence of paths to HDF5 demonstration archives.
             horizon: Prediction action chunk horizon H.
             cameras: Names of camera streams to load.
             stats: Optional precomputed normalization statistics dictionary.
             preload: If True, loads all images and proprioception into RAM for zero-disk-IO training.
-            use_progress: If True, appends synthetic [0, 1] step progress clock.
-            proprio_history_lags: Causal step lags (e.g. (0, 4, 8, 12)) to stack for temporal proprioception memory.
-            trim_stationary: If True, filters out zero-velocity stationary grasp-dwell frames.
-            action_space: Action chunk parameterization ('joint_abs', 'joint_delta', or 'eef_se3').
             return_uint8_images: If True, returns raw (H, W, 3) uint8 camera tensors so permutation and
                 [0, 1] float normalization can execute in a single vectorized GPU batch kernel.
+            sample_stride: Optional temporal anchor stride across episodes. If None, defaults to 1 for
+                <=350 episodes and 2 for >350 episodes so 600-episode multi-camera archives stay <7 GB in RAM
+                while preserving full 20 Hz 16-step action chunks and staggered odd/even phase coverage.
         """
         super().__init__()
-        if action_space not in ("joint_abs", "joint_delta", "eef_se3"):
-            raise ValueError(
-                f"Unsupported action_space '{action_space}'. Expected 'joint_abs', 'joint_delta', or 'eef_se3'."
-            )
-        self.h5_path = Path(h5_path).resolve()
-        self.horizon = horizon
-        self.cameras = cameras
-        self.preload = preload
-        self.use_progress = use_progress
-        self.proprio_history_lags = tuple(int(l) for l in proprio_history_lags)
-        self.trim_stationary = trim_stationary
-        self.action_space = action_space
-        self.return_uint8_images = return_uint8_images
-        if action_space == "eef_se3":
-            base_dim = 11 if use_progress else 10
-            self.act_dim = 10
+        if isinstance(h5_path, (str, Path)):
+            raw_str = str(h5_path)
+            if "," in raw_str:
+                self.h5_paths = [Path(p.strip()).resolve() for p in raw_str.split(",") if p.strip()]
+            else:
+                self.h5_paths = [Path(h5_path).resolve()]
         else:
-            base_dim = 9 if use_progress else 8
-            self.act_dim = 8
-        self.proprio_dim = base_dim * len(self.proprio_history_lags)
+            self.h5_paths = [Path(p).resolve() for p in h5_path]
+        self.h5_path = self.h5_paths[0]
+        self.horizon = horizon
+        self.cameras = tuple(cameras)
+        self.preload = preload
+        self.return_uint8_images = return_uint8_images
+        self.act_dim = 8
+        self.proprio_dim = 8
 
-        self.episodes_images: Dict[str, List[np.ndarray]] = {cam: [] for cam in cameras}
+        for p in self.h5_paths:
+            if not p.exists():
+                raise FileNotFoundError(f"HDF5 dataset not found at: {p}")
+
+        if sample_stride is None:
+            total_eps = 0
+            for p in self.h5_paths:
+                with h5py.File(p, "r") as f:
+                    total_eps += len(f["data"].keys())
+            self.sample_stride = 2 if total_eps > 350 else 1
+        else:
+            self.sample_stride = max(1, int(sample_stride))
+
+        self.episodes_images: Dict[str, List[np.ndarray]] = {cam: [] for cam in self.cameras}
         self.episodes_proprio: List[np.ndarray] = []
-        self.episodes_pose: List[np.ndarray] = []
         self.episodes_act: List[np.ndarray] = []
+        self.episode_sources: List[int] = []
+        self.sample_sources: List[int] = []
         self.indices: List[Tuple[int, int]] = []
-        self.has_aux_pose: bool = False
-
-        if not self.h5_path.exists():
-            raise FileNotFoundError(f"HDF5 dataset not found at: {self.h5_path}")
+        self.local_img_indices: List[int] = []
 
         self._load_data()
 
@@ -262,24 +261,29 @@ class VisionWateringDataset(Dataset):
         self._cached_images: Dict[str, torch.Tensor] = {}
         self._cached_proprio: Optional[torch.Tensor] = None
         self._cached_actions: Optional[torch.Tensor] = None
-        self._cached_pose: Optional[torch.Tensor] = None
         if self.preload:
             self._build_tensor_cache()
 
     def _load_data(self) -> None:
-        ik_fk: Optional[IKSolver] = None
-        if self.action_space == "eef_se3":
-            pkg_root = Path(__file__).resolve().parent.parent.parent
-            xml_path = str(pkg_root / "assets" / "scenes" / "desk_scene.xml")
-            mj_model = mujoco.MjModel.from_xml_path(xml_path)
-            ik_fk = IKSolver(mj_model, site_name="pinch")
+        open_files = [h5py.File(path, "r") for path in self.h5_paths]
+        try:
+            per_source_demos: List[List[Tuple[int, str]]] = []
+            for src_idx, f in enumerate(open_files):
+                data_grp = f["data"]
+                names = sorted(list(data_grp.keys()), key=lambda x: int(x.split("_")[1]))
+                per_source_demos.append([(src_idx, name) for name in names])
 
-        with h5py.File(self.h5_path, "r") as f:
-            data_grp = f["data"]
-            demo_names = sorted(list(data_grp.keys()), key=lambda x: int(x.split("_")[1]))
+            # Interleave episodes across sources (e.g. clean_0, dr_0, clean_1, dr_1, ...)
+            # so any contiguous memory window has an exact balanced mix of all domains.
+            interleaved_demos: List[Tuple[int, str]] = []
+            max_len = max((len(lst) for lst in per_source_demos), default=0)
+            for i in range(max_len):
+                for lst in per_source_demos:
+                    if i < len(lst):
+                        interleaved_demos.append(lst[i])
 
-            for ep_idx, name in enumerate(demo_names):
-                demo = data_grp[name]
+            for ep_idx, (src_idx, name) in enumerate(interleaved_demos):
+                demo = open_files[src_idx]["data"][name]
                 obs_grp = demo["obs"]
                 actions = np.array(demo["actions"], dtype=np.float32)
                 T = len(actions)
@@ -290,7 +294,7 @@ class VisionWateringDataset(Dataset):
                     gripper_width = gripper_width[:, None]
 
                 keep_mask: Optional[np.ndarray] = None
-                if self.trim_stationary and T > 2:
+                if T > 2:
                     dq = np.linalg.norm(np.diff(arm_qpos, axis=0, prepend=arm_qpos[:1]), axis=1)
                     dg = np.abs(np.diff(gripper_width[:, 0], prepend=gripper_width[:1, 0]))
                     da = np.linalg.norm(np.diff(actions[:, :7], axis=0, prepend=actions[:1, :7]), axis=1)
@@ -302,62 +306,33 @@ class VisionWateringDataset(Dataset):
                         actions = actions[keep_mask]
                         T = len(actions)
 
-                if ik_fk is not None:
-                    eef_q = np.zeros((T, 9), dtype=np.float32)
-                    eef_a = np.zeros((T, 10), dtype=np.float32)
-                    for idx_t in range(T):
-                        pq, rq = ik_fk.forward_kinematics(arm_qpos[idx_t])
-                        pa, ra = ik_fk.forward_kinematics(actions[idx_t, :7])
-                        eef_q[idx_t, :3] = pq
-                        eef_q[idx_t, 3:9] = rotmat_to_rot6d(rq)
-                        eef_a[idx_t, :3] = pa
-                        eef_a[idx_t, 3:9] = rotmat_to_rot6d(ra)
-                        eef_a[idx_t, 9] = actions[idx_t, 7]
-                    arm_state = eef_q
-                    actions = eef_a
-                else:
-                    arm_state = arm_qpos
-
-                if self.use_progress:
-                    progress = np.linspace(0.0, 1.0, T, dtype=np.float32)[:, None]
-                    base_proprio = np.concatenate([arm_state, gripper_width, progress], axis=-1)
-                else:
-                    base_proprio = np.concatenate([arm_state, gripper_width], axis=-1)
-
-                if self.proprio_history_lags == (0,):
-                    proprio = base_proprio
-                else:
-                    lagged_list = []
-                    for lag in self.proprio_history_lags:
-                        idx = np.clip(np.arange(T) - lag, 0, T - 1)
-                        lagged_list.append(base_proprio[idx])
-                    proprio = np.concatenate(lagged_list, axis=-1)
-
+                proprio = np.concatenate([arm_qpos, gripper_width], axis=-1)
                 self.episodes_proprio.append(proprio)
                 self.episodes_act.append(actions)
+                self.episode_sources.append(src_idx)
 
-                if "grip_pos" in obs_grp and "spout_pos" in obs_grp and "plant_pos" in obs_grp:
-                    grip_pos = np.array(obs_grp["grip_pos"], dtype=np.float32)
-                    spout_pos = np.array(obs_grp["spout_pos"], dtype=np.float32)
-                    plant_pos = np.array(obs_grp["plant_pos"], dtype=np.float32)
-                    pose = np.concatenate([grip_pos, spout_pos, plant_pos], axis=-1)
-                    if keep_mask is not None:
-                        pose = pose[keep_mask]
-                    self.episodes_pose.append(pose)
-                    self.has_aux_pose = True
+                phase_offset = ((ep_idx // max(1, len(open_files))) % self.sample_stride) if T > self.sample_stride else 0
+                anchor_ts = np.arange(phase_offset, T, self.sample_stride)
 
                 for cam in self.cameras:
                     cam_key = f"rgb_{cam}"
                     img_data = np.array(obs_grp[cam_key], dtype=np.uint8)
                     if keep_mask is not None:
                         img_data = img_data[keep_mask]
+                    if self.sample_stride > 1:
+                        img_data = np.ascontiguousarray(img_data[anchor_ts])
                     self.episodes_images[cam].append(img_data)
 
-                for t in range(T):
-                    self.indices.append((ep_idx, t))
+                for local_i, t in enumerate(anchor_ts):
+                    self.indices.append((ep_idx, int(t)))
+                    self.local_img_indices.append(local_i)
+                    self.sample_sources.append(src_idx)
+        finally:
+            for f in open_files:
+                f.close()
 
     def _extract_raw_chunk(self, ep_idx: int, t: int) -> np.ndarray:
-        """Extract an (H, act_dim) action chunk at (ep_idx, t) in the configured action_space."""
+        """Extract an (H, 8) joint action chunk at (ep_idx, t)."""
         ep_act = self.episodes_act[ep_idx]
         chunk = ep_act[t : t + self.horizon]
         if len(chunk) < self.horizon:
@@ -365,62 +340,33 @@ class VisionWateringDataset(Dataset):
             last_act = ep_act[-1:]
             padding = np.repeat(last_act, pad_count, axis=0)
             chunk = np.concatenate([chunk, padding], axis=0)
-        if self.action_space == "joint_delta":
-            q_t = self.episodes_proprio[ep_idx][t, :7]
-            chunk = chunk.copy()
-            chunk[:, :7] = chunk[:, :7] - q_t[None, :]
         return chunk
 
     def _compute_stats(self) -> Dict[str, np.ndarray]:
         all_proprio = np.concatenate(self.episodes_proprio, axis=0)
-
         proprio_mean = np.mean(all_proprio, axis=0).astype(np.float32)
         proprio_std = np.std(all_proprio, axis=0).astype(np.float32)
         proprio_std = np.clip(proprio_std, a_min=1e-3, a_max=None)
 
-        if self.action_space == "joint_delta":
-            all_chunks = np.stack(
-                [self._extract_raw_chunk(ep_idx, t) for ep_idx, t in self.indices],
-                axis=0,
-            )
-            act_mean = np.mean(all_chunks, axis=0).astype(np.float32)
-            act_std = np.std(all_chunks, axis=0).astype(np.float32)
-            act_std = np.clip(act_std, a_min=1e-3, a_max=None)
-        else:
-            all_act = np.concatenate(self.episodes_act, axis=0)
-            act_mean = np.mean(all_act, axis=0).astype(np.float32)
-            act_std = np.std(all_act, axis=0).astype(np.float32)
-            act_std = np.clip(act_std, a_min=1e-3, a_max=None)
-            if self.action_space == "eef_se3":
-                act_std[3:9] = np.clip(act_std[3:9], a_min=0.05, a_max=None)
-                base_dim = 11 if self.use_progress else 10
-                for lag_i in range(len(self.proprio_history_lags)):
-                    offset = lag_i * base_dim
-                    proprio_std[offset + 3 : offset + 9] = np.clip(
-                        proprio_std[offset + 3 : offset + 9], a_min=0.05, a_max=None
-                    )
+        all_act = np.concatenate(self.episodes_act, axis=0)
+        act_mean = np.mean(all_act, axis=0).astype(np.float32)
+        act_std = np.std(all_act, axis=0).astype(np.float32)
+        act_std = np.clip(act_std, a_min=1e-3, a_max=None)
 
-        stats_dict: Dict[str, np.ndarray] = {
+        return {
             "proprio_mean": proprio_mean,
             "proprio_std": proprio_std,
             "act_mean": act_mean,
             "act_std": act_std,
         }
 
-        if self.has_aux_pose and len(self.episodes_pose) > 0:
-            all_pose = np.concatenate(self.episodes_pose, axis=0)
-            pose_mean = np.mean(all_pose, axis=0).astype(np.float32)
-            pose_std = np.std(all_pose, axis=0).astype(np.float32)
-            pose_std = np.clip(pose_std, a_min=1e-2, a_max=None)
-            stats_dict["pose_mean"] = pose_mean
-            stats_dict["pose_std"] = pose_std
-
-        return stats_dict
-
     def _build_tensor_cache(self) -> None:
-        """Pre-pack contiguous normalized tensors in RAM so batch loading avoids per-item Python loops."""
-        all_proprio = np.concatenate(self.episodes_proprio, axis=0)
-        norm_proprio = self.normalize_proprio(all_proprio).astype(np.float32)
+        """Pre-pack contiguous normalized tensors in RAM without temporary 2x memory duplication."""
+        indexed_proprio = np.stack(
+            [self.episodes_proprio[ep_idx][t] for ep_idx, t in self.indices],
+            axis=0,
+        )
+        norm_proprio = self.normalize_proprio(indexed_proprio).astype(np.float32)
         self._cached_proprio = torch.from_numpy(norm_proprio)
 
         raw_chunks = np.stack(
@@ -430,20 +376,36 @@ class VisionWateringDataset(Dataset):
         norm_chunks = self.normalize_action(raw_chunks).astype(np.float32)
         self._cached_actions = torch.from_numpy(norm_chunks)
 
-        if self.has_aux_pose and "pose_mean" in self.stats and len(self.episodes_pose) > 0:
-            all_pose = np.concatenate(self.episodes_pose, axis=0)
-            norm_pose = ((all_pose - self.stats["pose_mean"]) / self.stats["pose_std"]).astype(np.float32)
-            self._cached_pose = torch.from_numpy(norm_pose)
-
+        num_total = len(self.indices)
         for cam in self.cameras:
-            cat_imgs = np.concatenate(self.episodes_images[cam], axis=0)
-            self._cached_images[cam] = torch.from_numpy(cat_imgs)
-            # Re-point episodes_images to zero-copy slices of cat_imgs to avoid duplicating RAM
+            ep_list = self.episodes_images[cam]
+            sample_shape = ep_list[0].shape[1:]
+            cat_tensor = torch.empty((num_total, *sample_shape), dtype=torch.uint8)
+            cat_np = cat_tensor.numpy()
             offset = 0
-            for ep_i in range(len(self.episodes_images[cam])):
-                ep_len = len(self.episodes_images[cam][ep_i])
-                self.episodes_images[cam][ep_i] = cat_imgs[offset : offset + ep_len]
+            for ep_i in range(len(ep_list)):
+                ep_arr = ep_list[ep_i]
+                ep_len = len(ep_arr)
+                cat_np[offset : offset + ep_len] = ep_arr
+                ep_list[ep_i] = cat_np[offset : offset + ep_len]
                 offset += ep_len
+            self._cached_images[cam] = cat_tensor
+
+    def sample_epoch_permutation(self, window_samples: int = 8192) -> torch.Tensor:
+        """Generate a cache-friendly rolling-window permutation across the dataset."""
+        n = len(self.indices)
+        if n <= window_samples or len(self.h5_paths) <= 1:
+            return torch.randperm(n)
+
+        shift = int(torch.randint(0, window_samples, (1,)).item())
+        base_indices = torch.roll(torch.arange(n, dtype=torch.long), shifts=shift)
+        windows = list(torch.split(base_indices, window_samples))
+        win_order = torch.randperm(len(windows)).tolist()
+        shuffled_windows = [
+            windows[w_idx][torch.randperm(len(windows[w_idx]))]
+            for w_idx in win_order
+        ]
+        return torch.cat(shuffled_windows, dim=0)
 
     def get_batch(
         self,
@@ -451,18 +413,16 @@ class VisionWateringDataset(Dataset):
         device: torch.device,
         shifter: Optional[torch.nn.Module] = None,
     ) -> Tuple[Dict[str, torch.Tensor], torch.Tensor]:
-        """Fetch and normalize an entire minibatch directly on the target device in C++."""
+        """Fetch and normalize an entire minibatch directly on the target device."""
         assert self._cached_proprio is not None and self._cached_actions is not None
         dev_obs: Dict[str, torch.Tensor] = {
             "proprio": self._cached_proprio[batch_indices].to(device),
         }
-        if self._cached_pose is not None:
-            dev_obs["aux_pose"] = self._cached_pose[batch_indices].to(device)
 
         for cam in self.cameras:
             cam_key = f"rgb_{cam}"
             img_dev = self._cached_images[cam][batch_indices].to(device)
-            img_f32 = img_dev.permute(0, 3, 1, 2).float().div_(255.0)
+            img_f32 = img_dev.permute(0, 3, 1, 2).contiguous().float().div_(255.0)
             if shifter is not None:
                 img_f32 = shifter(img_f32)
             dev_obs[cam_key] = img_f32
@@ -507,15 +467,14 @@ class VisionWateringDataset(Dataset):
                 else:
                     obs_dict[f"rgb_{cam}"] = raw_img.permute(2, 0, 1).float() / 255.0
             obs_dict["proprio"] = self._cached_proprio[idx]
-            if self._cached_pose is not None:
-                obs_dict["aux_pose"] = self._cached_pose[idx]
             return obs_dict, self._cached_actions[idx]
 
         ep_idx, t = self.indices[idx]
+        local_i = self.local_img_indices[idx]
 
         obs_dict = {}
         for cam in self.cameras:
-            raw_img_np = self.episodes_images[cam][ep_idx][t]
+            raw_img_np = self.episodes_images[cam][ep_idx][local_i]
             if self.return_uint8_images:
                 obs_dict[f"rgb_{cam}"] = torch.from_numpy(raw_img_np)
             else:
@@ -525,11 +484,6 @@ class VisionWateringDataset(Dataset):
         raw_proprio = self.episodes_proprio[ep_idx][t]
         norm_proprio = self.normalize_proprio(raw_proprio)
         obs_dict["proprio"] = torch.from_numpy(norm_proprio).float()
-
-        if self.has_aux_pose and "pose_mean" in self.stats:
-            raw_pose = self.episodes_pose[ep_idx][t]
-            norm_pose = (raw_pose - self.stats["pose_mean"]) / self.stats["pose_std"]
-            obs_dict["aux_pose"] = torch.from_numpy(norm_pose).float()
 
         chunk = self._extract_raw_chunk(ep_idx, t)
         norm_chunk = self.normalize_action(chunk)

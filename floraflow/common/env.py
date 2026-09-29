@@ -41,6 +41,7 @@ class DeskWateringEnv:
         include_rgb: bool = False,
         rgb_cameras: Tuple[str, ...] = ("third_person_cam",),
         rgb_resolution: Tuple[int, int] = (128, 128),
+        domain_rand: bool = False,
     ) -> None:
         """Initialize the MuJoCo simulation environment."""
         self.can_pos_range = can_pos_range if can_pos_range is not None else self.DEFAULT_CAN_POS_RANGE
@@ -48,6 +49,7 @@ class DeskWateringEnv:
         self.include_rgb = include_rgb
         self.rgb_cameras = rgb_cameras
         self.rgb_resolution = rgb_resolution
+        self.domain_rand = domain_rand
         if xml_path is None:
             pkg_root = Path(__file__).resolve().parent.parent.parent
             xml_path = str(pkg_root / "assets" / "scenes" / "desk_scene.xml")
@@ -66,6 +68,7 @@ class DeskWateringEnv:
 
         # Query body, joint, site, and actuator IDs
         self._arm_joint_ids = [self.model.joint(f"joint{i}").id for i in range(1, 8)]
+        self._arm_dof_adrs = [self.model.jnt_dofadr[jid] for jid in self._arm_joint_ids]
         self._finger_joint_ids = [
             self.model.joint("finger_joint1").id,
             self.model.joint("finger_joint2").id,
@@ -87,6 +90,38 @@ class DeskWateringEnv:
         self._spout_site_id = self.model.site("can_spout_tip").id
         self._plant_site_id = self.model.site("plant_pot_center").id
 
+        # Query geom, material, and camera IDs for domain randomization
+        self._can_geom_ids = [
+            gid
+            for gid in range(self.model.ngeom)
+            if int(self.model.geom_bodyid[gid]) == self._can_body_id
+        ]
+        self._pot_geom_ids = [
+            self.model.geom(name).id
+            for name in ("pot_base", "pot_wall_n", "pot_wall_s", "pot_wall_e", "pot_wall_w")
+        ]
+        self._wood_table_mat_id = self.model.material("wood_table").id
+        self._leaf_mat_id = self.model.material("leaf_mat").id
+        self._soil_mat_id = self.model.material("soil_mat").id
+        self._cam_ids = {
+            cam_name: self.model.camera(cam_name).id
+            for cam_name in ("third_person_cam", "overhead_cam", "wrist_cam", "pour_cam")
+            if self.model.camera(cam_name) is not None
+        }
+
+        # Snapshot nominal MuJoCo model parameters for clean restoration
+        self._init_light_pos = self.model.light_pos.copy()
+        self._init_light_dir = self.model.light_dir.copy()
+        self._init_light_diffuse = self.model.light_diffuse.copy()
+        self._init_light_specular = self.model.light_specular.copy()
+        self._init_cam_pos = self.model.cam_pos.copy()
+        self._init_cam_quat = self.model.cam_quat.copy()
+        self._init_geom_rgba = self.model.geom_rgba.copy()
+        self._init_mat_rgba = self.model.mat_rgba.copy()
+        self._init_body_mass = self.model.body_mass.copy()
+        self._init_body_inertia = self.model.body_inertia.copy()
+        self._init_dof_damping = self.model.dof_damping.copy()
+
         # Water particle bodies
         self.n_particles = 8
         self._particle_jnt_ids = [
@@ -98,6 +133,153 @@ class DeskWateringEnv:
 
         self.renderer: Optional[mujoco.Renderer] = None
         self.current_step = 0
+        self.last_domain_params: Optional[Dict[str, Any]] = None
+
+    def restore_nominal_domain(self) -> None:
+        """Restore all visual and physical MuJoCo model parameters to their nominal studio values."""
+        self.model.light_pos[:] = self._init_light_pos
+        self.model.light_dir[:] = self._init_light_dir
+        self.model.light_diffuse[:] = self._init_light_diffuse
+        self.model.light_specular[:] = self._init_light_specular
+        self.model.cam_pos[:] = self._init_cam_pos
+        self.model.cam_quat[:] = self._init_cam_quat
+        self.model.geom_rgba[:] = self._init_geom_rgba
+        self.model.mat_rgba[:] = self._init_mat_rgba
+        self.model.body_mass[:] = self._init_body_mass
+        self.model.body_inertia[:] = self._init_body_inertia
+        self.model.dof_damping[:] = self._init_dof_damping
+        self.last_domain_params = None
+
+    def sample_domain_params(self, rng: np.random.Generator) -> Dict[str, Any]:
+        """Sample a deterministic JSON-serializable dictionary of Sim-to-Real domain perturbations."""
+        # 1. Lighting position, direction, intensity, and color temperature
+        light_pos_delta = rng.uniform(
+            low=[-0.30, -0.30, -0.20],
+            high=[0.30, 0.30, 0.20],
+            size=self._init_light_pos.shape,
+        )
+        light_dir_delta = rng.uniform(
+            low=-0.25,
+            high=0.25,
+            size=self._init_light_dir.shape,
+        )
+        light_intensity_scale = float(rng.uniform(0.55, 1.35))
+        light_rgb_tint = rng.uniform(0.85, 1.15, size=(3,))
+
+        # 2. Object and tabletop appearance (RGB colors)
+        base_can_rgb = self._init_geom_rgba[self._can_geom_ids[0], :3]
+        can_rgb = np.clip(
+            base_can_rgb * rng.uniform(0.65, 1.35, size=(3,)) + rng.uniform(-0.08, 0.08, size=(3,)),
+            0.05,
+            0.95,
+        )
+        base_pot_rgb = self._init_geom_rgba[self._pot_geom_ids[0], :3]
+        pot_rgb = np.clip(
+            base_pot_rgb * rng.uniform(0.65, 1.35, size=(3,)) + rng.uniform(-0.08, 0.08, size=(3,)),
+            0.05,
+            0.95,
+        )
+        base_leaf_rgb = self._init_mat_rgba[self._leaf_mat_id, :3]
+        leaf_rgb = np.clip(
+            base_leaf_rgb * rng.uniform(0.70, 1.30, size=(3,)) + rng.uniform(-0.06, 0.06, size=(3,)),
+            0.05,
+            0.95,
+        )
+        desk_rgb_scale = np.clip(rng.uniform(0.65, 1.25, size=(3,)), 0.45, 1.35)
+
+        # 3. Camera mount extrinsics jitter (position & small axis-angle orientation)
+        cam_pos_deltas: Dict[str, list[float]] = {}
+        cam_euler_deltas: Dict[str, list[float]] = {}
+        for cam_name in ("third_person_cam", "overhead_cam", "wrist_cam"):
+            if cam_name not in self._cam_ids:
+                continue
+            if cam_name == "wrist_cam":
+                pos_lim, rot_lim = 0.004, 0.010
+            else:
+                pos_lim, rot_lim = 0.012, 0.020
+            cam_pos_deltas[cam_name] = [
+                float(x) for x in rng.uniform(-pos_lim, pos_lim, size=(3,))
+            ]
+            cam_euler_deltas[cam_name] = [
+                float(x) for x in rng.uniform(-rot_lim, rot_lim, size=(3,))
+            ]
+
+        # 4. Physical dynamics (payload mass & arm joint damping)
+        can_mass_scale = float(rng.uniform(0.70, 2.00))
+        arm_damping_scale = [float(x) for x in rng.uniform(0.80, 1.25, size=(7,))]
+
+        return {
+            "light_pos_delta": [[float(v) for v in row] for row in light_pos_delta],
+            "light_dir_delta": [[float(v) for v in row] for row in light_dir_delta],
+            "light_intensity_scale": light_intensity_scale,
+            "light_rgb_tint": [float(v) for v in light_rgb_tint],
+            "can_rgb": [float(v) for v in can_rgb],
+            "pot_rgb": [float(v) for v in pot_rgb],
+            "leaf_rgb": [float(v) for v in leaf_rgb],
+            "desk_rgb_scale": [float(v) for v in desk_rgb_scale],
+            "cam_pos_deltas": cam_pos_deltas,
+            "cam_euler_deltas": cam_euler_deltas,
+            "can_mass_scale": can_mass_scale,
+            "arm_damping_scale": arm_damping_scale,
+        }
+
+    def apply_domain_params(self, params: Dict[str, Any]) -> None:
+        """Apply a dictionary of Sim-to-Real domain perturbations onto the active MuJoCo model."""
+        self.restore_nominal_domain()
+
+        # 1. Lighting
+        light_pos_delta = np.array(params["light_pos_delta"], dtype=np.float64)
+        self.model.light_pos[:] = self._init_light_pos + light_pos_delta
+
+        light_dir = self._init_light_dir + np.array(params["light_dir_delta"], dtype=np.float64)
+        norms = np.linalg.norm(light_dir, axis=1, keepdims=True)
+        self.model.light_dir[:] = light_dir / np.clip(norms, 1e-6, None)
+
+        scale = float(params["light_intensity_scale"])
+        tint = np.array(params["light_rgb_tint"], dtype=np.float32)[None, :]
+        self.model.light_diffuse[:] = np.clip(self._init_light_diffuse * scale * tint, 0.05, 1.50)
+
+        # 2. Object and tabletop appearance
+        can_rgb = np.array(params["can_rgb"], dtype=np.float32)
+        for gid in self._can_geom_ids:
+            self.model.geom_rgba[gid, :3] = can_rgb
+
+        pot_rgb = np.array(params["pot_rgb"], dtype=np.float32)
+        for gid in self._pot_geom_ids:
+            self.model.geom_rgba[gid, :3] = pot_rgb
+
+        self.model.mat_rgba[self._leaf_mat_id, :3] = np.array(params["leaf_rgb"], dtype=np.float32)
+        self.model.mat_rgba[self._wood_table_mat_id, :3] = np.array(params["desk_rgb_scale"], dtype=np.float32)
+
+        # 3. Camera mount extrinsics
+        cam_pos_deltas = params.get("cam_pos_deltas", {})
+        cam_euler_deltas = params.get("cam_euler_deltas", {})
+        for cam_name, cid in self._cam_ids.items():
+            if cam_name in cam_pos_deltas:
+                self.model.cam_pos[cid] = self._init_cam_pos[cid] + np.array(
+                    cam_pos_deltas[cam_name], dtype=np.float64
+                )
+            if cam_name in cam_euler_deltas:
+                euler = np.array(cam_euler_deltas[cam_name], dtype=np.float64)
+                angle = float(np.linalg.norm(euler))
+                if angle > 1e-8:
+                    axis = euler / angle
+                    dq = np.zeros(4, dtype=np.float64)
+                    mujoco.mju_axisAngle2Quat(dq, axis, angle)
+                    q_new = np.zeros(4, dtype=np.float64)
+                    mujoco.mju_mulQuat(q_new, self._init_cam_quat[cid], dq)
+                    self.model.cam_quat[cid] = q_new
+
+        # 4. Physical dynamics
+        mass_scale = float(params.get("can_mass_scale", 1.0))
+        self.model.body_mass[self._can_body_id] = self._init_body_mass[self._can_body_id] * mass_scale
+        self.model.body_inertia[self._can_body_id] = self._init_body_inertia[self._can_body_id] * mass_scale
+
+        damping_scales = params.get("arm_damping_scale", [1.0] * 7)
+        for dof_adr, d_scale in zip(self._arm_dof_adrs, damping_scales):
+            self.model.dof_damping[dof_adr] = self._init_dof_damping[dof_adr] * float(d_scale)
+
+        self.last_domain_params = params
 
     @classmethod
     def is_valid_spawn(
@@ -158,9 +340,20 @@ class DeskWateringEnv:
         seed: Optional[int] = None,
         can_xy: Optional[Tuple[float, float]] = None,
         plant_xy: Optional[Tuple[float, float]] = None,
+        domain_params: Optional[Dict[str, Any]] = None,
     ) -> Dict[str, np.ndarray]:
-        """Reset environment with optional seed and validated collision-free object positions."""
+        """Reset environment with optional seed, object positions, and Sim-to-Real domain randomization."""
         rng = np.random.default_rng(seed)
+        if domain_params is not None:
+            self.apply_domain_params(domain_params)
+        elif self.domain_rand:
+            dr_seed = (seed + 1_000_000) if seed is not None else None
+            dr_rng = np.random.default_rng(dr_seed)
+            sampled_params = self.sample_domain_params(dr_rng)
+            self.apply_domain_params(sampled_params)
+        else:
+            self.restore_nominal_domain()
+
         default_qpos = np.array([0.0, -0.35, 0.0, -2.1, 0.0, 1.75, 0.785])
         particle_offsets = [
             (-0.01, -0.01, 0.02),

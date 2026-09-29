@@ -7,6 +7,7 @@ benchmarking physical task success rates, pour metrics, and inference latencies.
 from __future__ import annotations
 
 from dataclasses import dataclass
+import json
 from pathlib import Path
 import time
 from typing import Any, Dict, List, Optional, Tuple
@@ -346,6 +347,95 @@ def generate_ood_configurations(
         plant_xys.append((float(px), float(py)))
 
     return seeds, can_xys, plant_xys
+
+
+def load_or_create_sim2real_benchmark(
+    manifest_path: str = "datasets/eval_sim2real_benchmark.json",
+    id_episodes: int = 20,
+    ood_episodes: int = 50,
+    id_base_seed: int = 100,
+    ood_base_seed: int = 200,
+    ood_difficulty: str = "hard",
+) -> Dict[str, List[Dict[str, Any]]]:
+    """Load or deterministically create and save the 4-split Sim-to-Real evaluation manifest.
+
+    Splits:
+      - clean_id:  20 In-Distribution object spawns, nominal clean studio environment
+      - clean_ood: 50 Hard Out-of-Distribution object spawns, nominal clean studio environment
+      - dr_id:     Same 20 ID object spawns + saved Sim-to-Real visual & physical perturbations
+      - dr_ood:    Same 50 Hard OOD object spawns + saved Sim-to-Real visual & physical perturbations
+    """
+    p = Path(manifest_path).resolve()
+    if p.exists():
+        with open(p, "r") as f:
+            manifest = json.load(f)
+        if (
+            len(manifest.get("clean_id", [])) >= id_episodes
+            and len(manifest.get("clean_ood", [])) >= ood_episodes
+            and len(manifest.get("dr_id", [])) >= id_episodes
+            and len(manifest.get("dr_ood", [])) >= ood_episodes
+        ):
+            return manifest
+
+    env = DeskWateringEnv(control_hz=20, include_rgb=False, domain_rand=False)
+
+    clean_id_list: List[Dict[str, Any]] = []
+    dr_id_list: List[Dict[str, Any]] = []
+    for i in range(id_episodes):
+        seed = id_base_seed + i
+        obs = env.reset(seed=seed)
+        c_xy = [float(obs["can_pos"][0]), float(obs["can_pos"][1])]
+        p_xy = [float(obs["plant_pos"][0]), float(obs["plant_pos"][1])]
+        dr_rng = np.random.default_rng(seed + 1_000_000)
+        dr_params = env.sample_domain_params(dr_rng)
+        clean_id_list.append({
+            "seed": seed,
+            "can_xy": c_xy,
+            "plant_xy": p_xy,
+            "domain_params": None,
+        })
+        dr_id_list.append({
+            "seed": seed,
+            "can_xy": c_xy,
+            "plant_xy": p_xy,
+            "domain_params": dr_params,
+        })
+
+    ood_seeds, ood_cans, ood_plants = generate_ood_configurations(
+        num_episodes=ood_episodes,
+        base_seed=ood_base_seed,
+        difficulty=ood_difficulty,
+    )
+    clean_ood_list: List[Dict[str, Any]] = []
+    dr_ood_list: List[Dict[str, Any]] = []
+    for seed, c_xy_t, p_xy_t in zip(ood_seeds, ood_cans, ood_plants):
+        c_xy = [float(c_xy_t[0]), float(c_xy_t[1])]
+        p_xy = [float(p_xy_t[0]), float(p_xy_t[1])]
+        dr_rng = np.random.default_rng(seed + 1_000_000)
+        dr_params = env.sample_domain_params(dr_rng)
+        clean_ood_list.append({
+            "seed": int(seed),
+            "can_xy": c_xy,
+            "plant_xy": p_xy,
+            "domain_params": None,
+        })
+        dr_ood_list.append({
+            "seed": int(seed),
+            "can_xy": c_xy,
+            "plant_xy": p_xy,
+            "domain_params": dr_params,
+        })
+
+    manifest = {
+        "clean_id": clean_id_list,
+        "clean_ood": clean_ood_list,
+        "dr_id": dr_id_list,
+        "dr_ood": dr_ood_list,
+    }
+    p.parent.mkdir(parents=True, exist_ok=True)
+    with open(p, "w") as f:
+        json.dump(manifest, f, indent=2)
+    return manifest
 
 
 def print_scorecard(title: str, card: BenchmarkScorecard) -> None:

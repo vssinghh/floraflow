@@ -43,18 +43,25 @@ def main() -> None:
         default=["third_person_cam", "overhead_cam", "wrist_cam"],
         help="Names of cameras to capture",
     )
+    parser.add_argument(
+        "--domain-rand",
+        action="store_true",
+        help="Enable Sim-to-Real visual and physical domain randomization during collection",
+    )
     args = parser.parse_args()
 
+    suffix = "_dr" if args.domain_rand else ""
     if args.state:
-        out_path = args.output or f"datasets/watering_demos_{args.num_demos}.h5"
+        out_path = args.output or f"datasets/watering_demos{suffix}_{args.num_demos}.h5"
         generate_demonstrations(
             num_demos=args.num_demos,
             output_path=out_path,
             start_seed=args.start_seed,
             widened_bounds=args.widened_bounds,
+            domain_rand=args.domain_rand,
         )
     else:
-        out_path = args.output or f"datasets/watering_demos_vision_{args.num_demos}.h5"
+        out_path = args.output or f"datasets/watering_demos_vision{suffix}_{args.num_demos}.h5"
         generate_vision_demonstrations(
             num_demos=args.num_demos,
             output_path=out_path,
@@ -62,6 +69,7 @@ def main() -> None:
             widened_bounds=not args.narrow_bounds,
             resolution=(args.resolution, args.resolution),
             cameras=tuple(args.cameras),
+            domain_rand=args.domain_rand,
         )
 
 

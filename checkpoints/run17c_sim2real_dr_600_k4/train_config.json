@@ -1,0 +1,34 @@
+{
+  "data_path": [
+    "datasets/watering_demos_vision_3cam_300.h5",
+    "datasets/watering_demos_vision_3cam_dr_300.h5"
+  ],
+  "save_dir": "checkpoints/run17c_sim2real_dr_600_k4",
+  "epochs": 20,
+  "batch_size": 128,
+  "lr": 0.0005,
+  "weight_decay": 0.0001,
+  "num_flow_samples": 4,
+  "act_dim": 8,
+  "proprio_dim": 8,
+  "horizon": 16,
+  "vision_feat_dim": 32,
+  "proprio_feat_dim": 64,
+  "hidden_dim": 256,
+  "num_blocks": 4,
+  "attn_heads": 4,
+  "gripper_weight": 2.5,
+  "shift_aug": 4,
+  "cameras": [
+    "third_person_cam",
+    "overhead_cam",
+    "wrist_cam"
+  ],
+  "dropout_cameras": [
+    "wrist_cam"
+  ],
+  "num_keypoints": 32,
+  "dropout": 0.05,
+  "keypoint_noise": 0.01,
+  "camera_dropout": 0.1
+}
